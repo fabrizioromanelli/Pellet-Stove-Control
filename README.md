@@ -54,7 +54,7 @@ pellet stove!).
 - ETNA Giulia EVO (Micronova J042, fumes temp and power reading doesn't work for the moment)
 - Extraflame Teodora Evo (at least turning on works)
 - El.Fire Venice Slim
-- Palazzetti Ecofire Violetta 7
+- Palazzetti Ecofire Violetta 7 (tested)
 - RED Loto
 - MCZ Kaika/Face
 - FreePoint Sharp
@@ -93,8 +93,14 @@ For ESP32 the IN/OUT matrix is:
 
 ## PCB project
 The folder PCB contains the project for the Printed Circuit Board of the Pellet Stove Control.
-The board is:
-__METTERE FOTO
+
+Front PCB board:
+
+![PCB Front](https://user-images.githubusercontent.com/26959336/221350145-703fa86c-7866-4b43-a54f-4f3aa0b211a6.jpg)
+
+Back PCB board:
+
+![PCB Retro](https://user-images.githubusercontent.com/26959336/221350151-4c8e91c2-f829-4022-836e-27dc6b2e277f.jpg)
 
 ## Micronova board pinout
 For the details related to the board pinout, refer to the manual. This project allows you to interface the stove with the serial port of the Micronova controller. Ask me in case of any doubts.
