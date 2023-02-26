@@ -109,7 +109,7 @@ For the details related to the board pinout, refer to the manual. This project a
 The protocol for the Micronova controller has been reverse engineered and it is as stable as possible; there is a known problem with writing some values for controlling the stove (such as Flame Power and Fan Speed) that are mapped on the EEPROM (rather than on RAM), however this has been included in the project to let the user control all the stove parameters.
 
 ## Building the project
-- Modify the following parameters contained in the pellet_stove_control.ino
+- Modify the following parameters contained in the Pellet-Stove-Control.ino
   - #define mqtt_server "your_MQTT_server_ip"
   - #define mqtt_port your_MQTT_port (usually 1883)
   - #define mqtt_topic "topic_name" (the name of the topic you choose to publish on)
@@ -122,14 +122,14 @@ The protocol for the Micronova controller has been reverse engineered and it is 
 
 ## MQTT topics
 - `mqtt_topic`, this is the main topic.
-- `connection_topic`, this topic contains connection details.
-- `state_topic`, this topic contains the detailed status of the stove.
-- `onoff_topic`, this topic contains information about the stove power on/off.
-- `ambtemp_topic`, this topic contains the ambient temperature.
-- `tempset_topic` this topic is used to read the target temperature.
-- `fumetemp_topic`, this topic is used to read the fumes temperature.
-- `flame_topic`, this topic is used to read the flame power (%).
-- `fan_topic`, this topic is used to read the fan speed (1-5).
+- `connection_state`, this topic contains connection details.
+- `state`, this topic contains the detailed status of the stove.
+- `power_state`, this topic contains information about the stove power on/off.
+- `ta_state`, this topic contains the ambient temperature.
+- `ts_state` this topic is used to read the target temperature.
+- `tf_state`, this topic is used to read the fumes temperature.
+- `p_state`, this topic is used to read the flame power (%).
+- `f_state`, this topic is used to read the fan speed (1-5).
 - `cmd`, is the topic used to control the stove.
 
 ### Command currently supported by the Pellet Stove Control
