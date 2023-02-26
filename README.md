@@ -77,19 +77,19 @@ The following components are needed:
 
 For ESP8266 the IN/OUT matrix is:
 
-`D2` <-> `Enable_RX`
-
-`D3` <-> `RX`
-
-`D4` <-> `TX`
+|ESP8266 I/O|Function|
+|---|---|
+|`D2`|`Enable RX`|
+|`D3`|`RX`|
+|`D4`|`TX`|
 
 For ESP32 the IN/OUT matrix is:
 
-`GPIO35` <-> `Enable_RX`
-
-`GPIO32` <-> `RX`
-
-`GPIO33` <-> `TX`
+|ESP32 I/O|Function|
+|---|---|
+|`GPIO35`|`Enable RX`|
+|`GPIO32`|`RX`|
+|`GPIO33`|`TX`|
 
 ## PCB project
 The folder PCB contains the project for the Printed Circuit Board of the Pellet Stove Control.
