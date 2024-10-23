@@ -11,45 +11,48 @@
 #define mqtt_user ""
 #define mqtt_pass ""
 #ifdef DEBUG
-#define UPDATE_PERIOD  10000
-#define FAST_UPDATE_PERIOD 600000
-#define RESTART_PERIOD 20000
+unsigned long UPDATE_PERIOD = 10000;
+unsigned long FAST_UPDATE_PERIOD = 600000;
 #else
-#define UPDATE_PERIOD 3600000     // 1h (in ms)
-#define FAST_UPDATE_PERIOD 300000 // 5m (in ms)
-#define RESTART_PERIOD 172800000  // 2d (in ms)
+unsigned long UPDATE_PERIOD = 1800000;    // 30m (in ms)
+unsigned long FAST_UPDATE_PERIOD = 60000; // 1m (in ms)
 #endif
 
-#define FAST_LOOP_CYCLES 10 // Number of cycles for the fast update period.
+#define FAST_LOOP_CYCLES 30 // FAST_LOOP_CYCLES * FAST_UPDATE_PERIOD = total number of ms update
+#define RESET_CYCLES 60
 
 SoftwareSerial StoveSerial;
 #define SERIAL_MODE SWSERIAL_8N2 // 8 data bits, parity none, 2 stop bits
 #define RX_PIN D3
 #define TX_PIN D4
 #define ENABLE_RX D2
+#define PIN_RESET D0
 
 WiFiClient espClient;
 PubSubClient client(espClient);
 WiFiManager wm;
 
 static bool sem = false;
-bool firstLoop  = true;
 bool fastUpdate = false;
-static unsigned int loopCounter = 0;
+bool boot = true;
+static unsigned long loopCounter = 0;
+static unsigned long resetCounter = 0;
 
-unsigned long previousMillis, previousRestartMillis;
+unsigned long previousMillis = 0;
 
-#define connection_topic mqtt_topic "/connection_state"
+#define connection_topic mqtt_topic "/connection"
 #define state_topic mqtt_topic "/state"
-#define power_topic mqtt_topic "/power_state"
-#define ta_topic mqtt_topic "/ta_state"
-#define tf_topic mqtt_topic "/tf_state"
-#define p_topic mqtt_topic "/p_state"
-#define f_topic mqtt_topic "/f_state"
-#define ts_topic mqtt_topic "/ts_state"
+#define onoff_topic mqtt_topic "/onoff"
+#define ambtemp_topic mqtt_topic "/ambtemp"
+#define fumetemp_topic mqtt_topic "/fumetemp"
+#define flame_topic mqtt_topic "/power"
+#define fan_topic mqtt_topic "/fan"
+#define tempset_topic mqtt_topic "/tempset"
 #define cmd mqtt_topic "/cmd"
 
-#define device_information "{\"manufacturer\": \"Fabrizio Romanelli\",\"identifiers\": [\"79F4C268-3947-52FA-A97F-6753F31DC625\"],\"model\": \"Pellet Stove Control\",\"name\": \"Micronova Pellet Stove Control\",\"sw_version\": \"1.0.0.0\"}"
+#define device_information "{\"manufacturer\": \"Fabrizio Romanelli\",\"identifiers\": [\"7a396f39-80d2-493b-8e8e-31a70e700bc6\"],\"model\": \"Micronova Controller\",\"name\": \"Micronova Controller\",\"sw_version\": \"1.0.0.0\"}"
+
+//0 - OFF, 1 - Starting, 2 - Pellet loading, 3 - Ignition, 4 - Work, 5 - Brazier cleaning, 6 - Final cleaning, 7 - Standby, 8 - Pellet missing alarm, 9 - Ignition failure alarm, 10 - Alarms (to be investigated)
 
 // RAM defines
 #define _RAMR           0x00
@@ -66,7 +69,7 @@ unsigned long previousMillis, previousRestartMillis;
 #define fanSetAddr      0x8A
 #define tempSetAddr     0x8B
 
-// Commands
+// Checksum: Code+Address+Value (hex)
 const char stoveOnOff[4] = {_RAMW, stovePOnOffAddr, 0x5A, (char)(_RAMW + stovePOnOffAddr + 0x5A)};
 const char stoveOff[4]   = {_RAMW, stoveStateAddr, 0x00, (char)(_RAMW + stoveStateAddr + 0x00)};
 
@@ -86,9 +89,15 @@ const char stoveFN5[4]   = {_EEPROMW, fanSetAddr, 0x05, (char)(_EEPROMW + fanSet
 
 uint8_t stoveState, tempSet, fumesTemp, flamePower, fanSpeed;
 float ambTemp;
-char stoveRxData[2];
+char stoveRxData[2]; // When the heater is sending data, it sends two bytes: a checksum and the value
 
-void setup_wifi()
+inline void safeDelay(unsigned int delay)
+{
+  unsigned long currentMillis = millis();
+  while (millis() - currentMillis < delay) {}
+}
+
+void setup_wifi() // Setup WiFiManager and connect to WiFi
 {
   ArduinoOTA.setHostname(mqtt_topic);
   ArduinoOTA.setPassword("micronova");
@@ -98,15 +107,16 @@ void setup_wifi()
   wm.autoConnect(mqtt_topic);
 }
 
-void reconnect()
+void reconnect() // Connect to MQTT server
 {
   // Loop until we're reconnected
   while (!client.connected())
   {
     Serial.print("Attempting MQTT connection...");
-    String clientId = "ESPClient-";
-    clientId += String(random(0xffff), HEX);
-    if (client.connect(clientId.c_str(), mqtt_user, mqtt_pass))
+    char clientId[15];
+    int randomNum = random(0xffff);
+    snprintf(clientId, sizeof(clientId), "ESPClient-%X", randomNum);
+    if (client.connect(clientId, mqtt_user, mqtt_pass))
     {
       client.setBufferSize(1024);
       Serial.println("connected");
@@ -116,11 +126,13 @@ void reconnect()
       Serial.print("failed, rc=");
       Serial.print(client.state());
       Serial.println(" try again in 5 seconds");
-      delay(5000);
+      // Wait 5 seconds before retrying
+      safeDelay(5000);
     }
   }
 }
 
+// This is the callback from a topic arrived via MQTT
 void callback(char *topic, byte *payload, unsigned int length)
 {
 #ifdef DEBUG
@@ -140,10 +152,10 @@ void callback(char *topic, byte *payload, unsigned int length)
       for (int i = 0; i < 4; i++)
       {
         StoveSerial.write(stoveOnOff[i]);
-        delay(1);
+        safeDelay(1);
       }
-      client.publish(power_topic, "ON", true);
-      delay(2000);
+      client.publish(onoff_topic, "ON", true);
+      safeDelay(2000);
       sem = false;
     }
 
@@ -164,11 +176,11 @@ void callback(char *topic, byte *payload, unsigned int length)
       for (int i = 0; i < 4; i++)
       {
         StoveSerial.write(stoveOff[i]);
-        delay(1);
+        safeDelay(1);
       }
 
-      client.publish(power_topic, "OFF", true);
-      delay(2000);
+      client.publish(onoff_topic, "OFF", true);
+      safeDelay(2000);
       sem = false;
     }
 
@@ -205,9 +217,9 @@ void callback(char *topic, byte *payload, unsigned int length)
         for (int i = 0; i < 4; i++)
         {
           StoveSerial.write(stovePW[i]);
-          delay(1);
+          safeDelay(1);
         }
-        delay(2000);
+        safeDelay(2000);
         sem = false;
       }
 
@@ -243,9 +255,9 @@ void callback(char *topic, byte *payload, unsigned int length)
         for (int i = 0; i < 4; i++)
         {
           StoveSerial.write(stoveFN[i]);
-          delay(1);
+          safeDelay(1);
         }
-        delay(2000);
+        safeDelay(2000);
         sem = false;
       }
 
@@ -272,9 +284,9 @@ void callback(char *topic, byte *payload, unsigned int length)
         for (int i = 0; i < 4; i++)
         {
           StoveSerial.write(temperatureSet[i]);
-          delay(1);
+          safeDelay(1);
         }
-        delay(2000);
+        safeDelay(2000);
         sem = false;
       }
 
@@ -294,7 +306,7 @@ void callback(char *topic, byte *payload, unsigned int length)
       Serial.printf("%01X -> ", t);
       getDBG(t);
       Serial.println();
-      delay(400);
+      safeDelay(400);
     }
 #endif
   }
@@ -315,11 +327,11 @@ void callback(char *topic, byte *payload, unsigned int length)
       for (int i = 0; i < 4; i++)
       {
         StoveSerial.write(stoveOff[i]);
-        delay(1);
+        safeDelay(1);
       }
 
-      client.publish(power_topic, "OFF", true);
-      delay(2000);
+      client.publish(onoff_topic, "OFF", true);
+      safeDelay(2000);
       sem = false;
     }
 
@@ -340,7 +352,7 @@ void checkStoveReply()
 #ifdef DEBUG
   Serial.printf("DBG01");
 #endif
-  while (StoveSerial.available())
+  while (StoveSerial.available()) // It has to be exactly 2 bytes, otherwise it's an error
   {
     stoveRxData[rxCount] = StoveSerial.read();
     rxCount++;
@@ -369,49 +381,49 @@ void checkStoveReply()
         {
           case 0:
             client.publish(state_topic, "Spenta", true);
-            delay(1000);
-            client.publish(power_topic, "OFF", true);
+            safeDelay(1000);
+            client.publish(onoff_topic, "OFF", true);
             break;
           case 1:
             client.publish(state_topic, "Avvio", true);
-            delay(1000);
-            client.publish(power_topic, "ON", true);
+            safeDelay(1000);
+            client.publish(onoff_topic, "ON", true);
             break;
           case 2:
             client.publish(state_topic, "Caricamento pellet", true);
-            delay(1000);
-            client.publish(power_topic, "ON", true);
+            safeDelay(1000);
+            client.publish(onoff_topic, "ON", true);
             break;
           case 3:
             client.publish(state_topic, "Accensione", true);
-            delay(1000);
-            client.publish(power_topic, "ON", true);
+            safeDelay(1000);
+            client.publish(onoff_topic, "ON", true);
             break;
           case 4:
             client.publish(state_topic, "Accesa", true);
-            delay(1000);
-            client.publish(power_topic, "ON", true);
+            safeDelay(1000);
+            client.publish(onoff_topic, "ON", true);
             break;
           case 5:
             client.publish(state_topic, "Pulizia braciere", true);
             break;
           case 6:
             client.publish(state_topic, "Pulizia finale", true);
-            delay(1000);
-            client.publish(power_topic, "OFF", true);
+            safeDelay(1000);
+            client.publish(onoff_topic, "OFF", true);
             break;
           case 7:
             client.publish(state_topic, "Standby", true);
-            delay(1000);
-            client.publish(power_topic, "OFF", true);
+            safeDelay(1000);
+            client.publish(onoff_topic, "OFF", true);
             break;
           case 8:
             client.publish(state_topic, "Pellet mancante", true);
             break;
           case 9:
             client.publish(state_topic, "Mancata accensione", true);
-            delay(1000);
-            client.publish(power_topic, "OFF", true);
+            safeDelay(1000);
+            client.publish(onoff_topic, "OFF", true);
             break;
           case 10:
             client.publish(state_topic, "Allarme", true);
@@ -423,7 +435,9 @@ void checkStoveReply()
         break;
       case ambTempAddr:
         ambTemp = (float)val / 2;
-        client.publish(ta_topic, String(ambTemp).c_str(), true);
+        char ambTempStr[10];
+        dtostrf(ambTemp, 4, 2, ambTempStr);
+        client.publish(ambtemp_topic, ambTempStr, true);
 #ifdef DEBUG
         Serial.print("T. amb. ");
         Serial.println(ambTemp);
@@ -431,7 +445,9 @@ void checkStoveReply()
         break;
       case fumesTempAddr:
         fumesTemp = val;
-        client.publish(tf_topic, String(fumesTemp).c_str(), true);
+        char fumesTempStr[10];
+        sprintf(fumesTempStr, "%d", fumesTemp);
+        client.publish(fumetemp_topic, fumesTempStr, true);
 #ifdef DEBUG
         Serial.printf("T. fumes %d\n", fumesTemp);
 #endif
@@ -439,21 +455,27 @@ void checkStoveReply()
       // EEPROM Cases
       case tempSetAddr + _EEPROMR:
         tempSet = val;
-        client.publish(ts_topic, String(tempSet).c_str(), true);
+        char tempSetStr[10];
+        sprintf(tempSetStr, "%d", tempSet);
+        client.publish(tempset_topic, tempSetStr, true);
 #ifdef DEBUG
         Serial.printf("T. set %d\n", tempSet);
 #endif
         break;
       case powerSetAddr + _EEPROMR:
         flamePower = val;
-        client.publish(p_topic, String(flamePower).c_str(), true);
+        char flamePowerStr[10];
+        sprintf(flamePowerStr, "%d", flamePower);
+        client.publish(flame_topic, flamePowerStr, true);
 #ifdef DEBUG
         Serial.printf("Flame Power %d\n", flamePower);
 #endif
         break;
       case fanSetAddr + _EEPROMR:
         fanSpeed = val;
-        client.publish(f_topic, String(fanSpeed).c_str(), true);
+        char fanSpeedStr[10];
+        sprintf(fanSpeedStr, "%d", fanSpeed);
+        client.publish(fan_topic, fanSpeedStr, true);
 #ifdef DEBUG
         Serial.printf("Fan Speed %d\n", fanSpeed);
 #endif
@@ -462,7 +484,7 @@ void checkStoveReply()
   }
 }
 
-void getStoveState()
+void getStoveState() // Get detailed stove state
 {
   const byte readByte = _RAMR;
 #ifdef DEBUG
@@ -472,7 +494,7 @@ void getStoveState()
 #ifdef DEBUG
   Serial.printf("DBGXXX2");
 #endif
-  delay(1);
+  safeDelay(1);
   StoveSerial.write(stoveStateAddr);
 #ifdef DEBUG
   Serial.printf("DBGXXX3");
@@ -481,14 +503,14 @@ void getStoveState()
 #ifdef DEBUG
   Serial.printf("DBGXXX4");
 #endif
-  delay(80);
+  safeDelay(80);
   checkStoveReply();
 #ifdef DEBUG
   Serial.printf("DBGXXX5");
 #endif
 }
 
-void getAmbTemp()
+void getAmbTemp() // Get room temperature
 {
   const byte readByte = _RAMR;
 #ifdef DEBUG
@@ -498,7 +520,7 @@ void getAmbTemp()
 #ifdef DEBUG
   Serial.printf("DBGYYY2");
 #endif
-  delay(1);
+  safeDelay(1);
   StoveSerial.write(ambTempAddr);
 #ifdef DEBUG
   Serial.printf("DBGYYY3");
@@ -507,14 +529,14 @@ void getAmbTemp()
 #ifdef DEBUG
   Serial.printf("DBGYYY4");
 #endif
-  delay(80);
+  safeDelay(80);
   checkStoveReply();
 #ifdef DEBUG
   Serial.printf("DBGYYY5");
 #endif
 }
 
-void getFumeTemp()
+void getFumeTemp() // Get flue gas temperature
 {
   const byte readByte = _RAMR;
 #ifdef DEBUG
@@ -524,7 +546,7 @@ void getFumeTemp()
 #ifdef DEBUG
   Serial.printf("DBGZZZ2");
 #endif
-  delay(1);
+  safeDelay(1);
   StoveSerial.write(fumesTempAddr);
 #ifdef DEBUG
   Serial.printf("DBGZZZ3");
@@ -533,14 +555,14 @@ void getFumeTemp()
 #ifdef DEBUG
   Serial.printf("DBGZZZ4");
 #endif
-  delay(80);
+  safeDelay(80);
   checkStoveReply();
 #ifdef DEBUG
   Serial.printf("DBGZZZ5");
 #endif
 }
 
-void getFlamePower()
+void getFlamePower() // Get the flame power
 {
   const byte readByte = _EEPROMR;
 #ifdef DEBUG
@@ -550,7 +572,7 @@ void getFlamePower()
 #ifdef DEBUG
   Serial.printf("DBGKKK2");
 #endif
-  delay(1);
+  safeDelay(1);
   StoveSerial.write(powerSetAddr);
 #ifdef DEBUG
   Serial.printf("DBGKKK3");
@@ -559,14 +581,14 @@ void getFlamePower()
 #ifdef DEBUG
   Serial.printf("DBGKKK4");
 #endif
-  delay(80);
+  safeDelay(80);
   checkStoveReply();
 #ifdef DEBUG
   Serial.printf("DBGKKK5");
 #endif
 }
 
-void getFanSpeed()
+void getFanSpeed() // Get the fan speed
 {
   const byte readByte = _EEPROMR;
 #ifdef DEBUG
@@ -576,7 +598,7 @@ void getFanSpeed()
 #ifdef DEBUG
   Serial.printf("DBGLLL2");
 #endif
-  delay(1);
+  safeDelay(1);
   StoveSerial.write(fanSetAddr);
 #ifdef DEBUG
   Serial.printf("DBGLLL3");
@@ -585,14 +607,14 @@ void getFanSpeed()
 #ifdef DEBUG
   Serial.printf("DBGLLL4");
 #endif
-  delay(80);
+  safeDelay(80);
   checkStoveReply();
 #ifdef DEBUG
   Serial.printf("DBGLLL5");
 #endif
 }
 
-void getTempSet()
+void getTempSet() // Get the thermostat setting
 {
   const byte readByte = _EEPROMR;
 #ifdef DEBUG
@@ -602,7 +624,7 @@ void getTempSet()
 #ifdef DEBUG
   Serial.printf("DBGOOO2");
 #endif
-  delay(1);
+  safeDelay(1);
   StoveSerial.write(tempSetAddr);
 #ifdef DEBUG
   Serial.printf("DBGOOO3");
@@ -611,27 +633,27 @@ void getTempSet()
 #ifdef DEBUG
   Serial.printf("DBGOOO4");
 #endif
-  delay(80);
+  safeDelay(80);
   checkStoveReply();
 #ifdef DEBUG
   Serial.printf("DBGOOO5");
 #endif
 }
 
-void getStates()
+void getStates() //Calls all the get…() functions
 {
   getStoveState();
-  delay(100);
+  safeDelay(100);
   getAmbTemp();
-  delay(100);
+  safeDelay(100);
   getTempSet();
-  delay(100);
+  safeDelay(100);
   getFumeTemp();
-  delay(100);
+  safeDelay(100);
   getFlamePower();
-  delay(100);
+  safeDelay(100);
   getFanSpeed();
-  delay(100);
+  safeDelay(100);
   client.publish(connection_topic, "Connected");
 }
 
@@ -642,10 +664,10 @@ INIT:
   //  const byte readByte = _EEPROMR;
   const byte readByte = _RAMR;
   StoveSerial.write(readByte);
-  delay(1);
+  safeDelay(1);
   StoveSerial.write(input);
   digitalWrite(ENABLE_RX, LOW);
-  delay(80);
+  safeDelay(80);
   uint8_t rxCount = 0;
   stoveRxData[0] = 0x00;
   stoveRxData[1] = 0x00;
@@ -670,14 +692,16 @@ INIT:
 
 void setup()
 {
-  pinMode(ENABLE_RX, OUTPUT);
   digitalWrite(ENABLE_RX, HIGH);
+  digitalWrite(PIN_RESET, HIGH);
   Serial.begin(115200);
   StoveSerial.begin(1200, SERIAL_MODE, RX_PIN, TX_PIN, false, 256);
   setup_wifi();
   client.setServer(mqtt_server, mqtt_port);
   client.setCallback(callback);
   client.subscribe(cmd);
+  pinMode(ENABLE_RX, OUTPUT);
+  pinMode(PIN_RESET, OUTPUT);
 }
 
 void loop()
@@ -689,22 +713,17 @@ void loop()
   }
   client.loop();
   ArduinoOTA.handle();
-  unsigned long currentMillis = millis();
-  if (previousMillis > currentMillis)
-  {
-    previousMillis = 0;
-  }
-
-  unsigned long updatePeriod = 0;
+  int updatePeriod = 0;
 
   if (fastUpdate)
     updatePeriod = FAST_UPDATE_PERIOD;
   else
     updatePeriod = UPDATE_PERIOD;
 
-  if (currentMillis - previousMillis >= updatePeriod || firstLoop)
+  if (((unsigned long)(millis() - previousMillis) > updatePeriod) || boot)
   {
-    previousMillis = currentMillis;
+    boot = false;
+    previousMillis = millis();
     if (!sem)
     {
       sem = true;
@@ -712,15 +731,16 @@ void loop()
       Serial.println();
       Serial.printf("Loop Start");
       Serial.println();
+      Serial.println(ESP.getFreeHeap());
 #endif
       getStates();
 #ifdef DEBUG
       Serial.println();
       Serial.printf("Loop Stop");
       Serial.println();
+      Serial.println(ESP.getFreeHeap());
 #endif
       sem = false;
-      firstLoop = false;
     }
 
     client.publish(connection_topic, "Connected");
@@ -733,13 +753,14 @@ void loop()
       fastUpdate = false;
       loopCounter = 0;
     }
+    resetCounter++;
   }
 
-  if (previousRestartMillis > currentMillis)
-    previousRestartMillis = 0;
-
-  // Known bug! We need to restart ESP after RESTART_PERIOD as
-  // something in stack or heap crashes if it loops for too long.
-  if (currentMillis - previousRestartMillis >= RESTART_PERIOD)
-    ESP.restart();
+  if (resetCounter > RESET_CYCLES)
+  {
+#ifdef DEBUG
+    Serial.printf("Reset request");
+#endif
+    digitalWrite(PIN_RESET, LOW);
+  }
 }
