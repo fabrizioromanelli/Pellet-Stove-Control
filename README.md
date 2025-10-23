@@ -2,7 +2,10 @@
 
 **I have prebuilt kits, ask me if you need any information!**
 
-This project allows you to smart control any pellet stove controlled via a Micronova Controller.
+This project allows you to smart control any pellet stove controlled via a Micronova Controller N100.
+The Arduino project has been compiled for an ESP8266 and successfully tested on a Micronova N100 Controller.
+Any other board from Micronova could work, but this is left to the user/developer (probably something changes
+on the memory mapping side).
 The program is written for Arduino, and it is tested on a D1 Mini with full integration for MQTT (Home Assistant, OpenHAB).
 
 ## The Pellet Stove Control works with
