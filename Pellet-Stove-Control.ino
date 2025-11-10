@@ -82,7 +82,7 @@ const char stoveFN[6][4] = {
 
 uint8_t stoveState, tempSet, fumesTemp, flamePower, fanSpeed;
 float ambTemp;
-char stoveRxData[2];  // When the heater is sending data, it sends two bytes: a checksum and the value
+char stoveRxData[2];  // When the stove is sending data, it sends two bytes: a checksum and the value
 
 // Utility: non-blocking delay
 void nonBlockingDelay(unsigned long ms) {
@@ -100,7 +100,7 @@ void setSemaphore(bool value) {
   interrupts();
 }
 
-// Funzione centrale per invio comandi
+// Main function to send commands
 void sendCommand(const char* _cmd) {
   if (!sem) {
     setSemaphore(true);
@@ -412,3 +412,4 @@ void loop() {
     // ESP.restart(); // cleaner, but still to be debugged
   }
 }
+
