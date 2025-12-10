@@ -94,6 +94,20 @@ For ESP32 the IN/OUT matrix is:
 |`GPIO32`|`RX`|
 |`GPIO33`|`TX`|
 
+## Micronova N100 serial port pinout
+
+![Serial pinout for both DE-9 and RJ11 connectors](https://github.com/user-attachments/assets/bfa9301f-3aa0-4ab5-97e0-21d374b9199b)
+
+The scheme shows the serial pinout from the Micronova N100 serial port with the connections for both the DE-9 connector and the RJ11 connector.
+
+|Color|Function|
+|---|---|
+|`Blue`|`Serial`|
+|`Red`|`+5V`|
+|`Black`|`Ground`|
+
+The fourth pin (the leftmost on the N100 board) is not used.
+
 ## PCB project
 The folder PCB contains the project for the Printed Circuit Board of the Pellet Stove Control.
 
