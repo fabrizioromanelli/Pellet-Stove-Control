@@ -1,5 +1,9 @@
 # Pellet Stove Control ![ESP8266](https://img.shields.io/badge/ESP-8266-000000.svg?longCache=true&style=flat&colorA=CCCC33) ![ESP32](https://img.shields.io/badge/ESP-32-000000.svg?longCache=true&style=flat&colorA=FF3500)
 
+<a href="https://buymeacoffee.com/fabrizioroz" target="_blank">
+  <img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me A Coffee" width="200">
+</a>
+
 **I have prebuilt kits, ask me if you need any information!**
 
 This project allows you to smart control any pellet stove controlled via a Micronova Controller N100.
