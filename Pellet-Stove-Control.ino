@@ -13,14 +13,12 @@ unsigned long UPDATE_PERIOD = 1800000; // 30m (in ms)
 unsigned long FAST_UPDATE_PERIOD = 60000; // 1m (in ms)
 
 #define FAST_LOOP_CYCLES 30
-#define RESET_CYCLES 60
 
 SoftwareSerial StoveSerial;
 #define SERIAL_MODE SWSERIAL_8N2
 #define RX_PIN D3
 #define TX_PIN D4
 #define ENABLE_RX D2
-#define PIN_RESET D0
 
 WiFiClient espClient;
 PubSubClient client(espClient);
@@ -30,7 +28,6 @@ static volatile bool sem = false;
 bool fastUpdate = false;
 bool boot = true;
 static unsigned long loopCounter = 0;
-static unsigned long resetCounter = 0;
 unsigned long previousMillis = 0;
 
 #define connection_topic mqtt_topic "/connection"
@@ -377,14 +374,12 @@ void getStates() // Calls all the get…() functions
 
 void setup() {
   digitalWrite(ENABLE_RX, HIGH);
-  digitalWrite(PIN_RESET, HIGH);
   Serial.begin(115200);
   StoveSerial.begin(1200, SERIAL_MODE, RX_PIN, TX_PIN, false, 256);
   setup_wifi();
   client.setServer(mqtt_server, mqtt_port);
   client.setCallback(callback);
   pinMode(ENABLE_RX, OUTPUT);
-  pinMode(PIN_RESET, OUTPUT);
 }
 
 void loop() {
@@ -404,12 +399,6 @@ void loop() {
     client.publish(connection_topic, "Connected");
     if (fastUpdate) loopCounter++;
     if (loopCounter > FAST_LOOP_CYCLES) { fastUpdate = false; loopCounter = 0; }
-    resetCounter++;
-  }
-
-  if (resetCounter > RESET_CYCLES) {
-    digitalWrite(PIN_RESET, LOW);
-    // ESP.restart(); // cleaner, but still to be debugged
   }
 }
 
