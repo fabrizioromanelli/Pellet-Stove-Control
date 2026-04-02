@@ -80,7 +80,7 @@ The following components are needed:
 - 1 x RJ11 Connector (if your stove has an RJ11 connected to the serial interface).
 
 ## Circuit diagram
-![Schematics](https://user-images.githubusercontent.com/26959336/217276025-cc22cac3-172c-4b23-bbed-d59402fb56fb.png)
+![Schematics](https://github.com/fabrizioromanelli/Pellet-Stove-Control/blob/master/PCB/Schematics.png)
 
 For ESP8266 the IN/OUT matrix is:
 
