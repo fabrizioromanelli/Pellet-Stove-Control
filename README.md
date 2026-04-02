@@ -77,7 +77,8 @@ The following components are needed:
 - An ESP8266 (D1 Mini or similar).
 - 3 x PC817.
 - 3 x 510 Ohms resistors.
-- 1 x RJ11 Connector (if your stove has an RJ11 connected to the serial interface).
+- 1 x RJ11 male connector (if your stove has a female RJ11 connected to the serial interface).
+- 1 x DB9 (DE-9) male connector (if your stove has an DB9 female connector).
 
 ## Circuit diagram
 ![Schematics](https://github.com/fabrizioromanelli/Pellet-Stove-Control/blob/master/PCB/Schematics.png)
