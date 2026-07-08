@@ -449,7 +449,7 @@ void getStates() // Calls all the get…() functions
   getFlamePower();
   nonBlockingDelay(100);
   getFanSpeed();
-  nonBlockingDelay(100);z
+  nonBlockingDelay(100);
   client.publish(connection_topic, "Connected");
 }
 
