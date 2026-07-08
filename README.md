@@ -131,16 +131,19 @@ For the details related to the board pinout, refer to the manual. This project a
 The protocol for the Micronova controller has been reverse engineered and it is as stable as possible; there is a known problem with writing some values for controlling the stove (such as Flame Power and Fan Speed) that are mapped on the EEPROM (rather than on RAM), however this has been included in the project to let the user control all the stove parameters.
 
 ## Building the project
-- Modify the following parameters contained in the Pellet-Stove-Control.ino
-  - #define mqtt_server "your_MQTT_server_ip"
-  - #define mqtt_port your_MQTT_port (usually 1883)
-  - #define mqtt_topic "topic_name" (the name of the topic you choose to publish on)
-  - #define mqtt_user "MQTT_user_name" (if any)
-  - #define mqtt_pass "MQTT_password" (if any)
-- Build the sketch with the Arduino IDE
+No MQTT parameter needs to be hardcoded in the sketch: everything is configured at first boot through the WiFiManager captive portal and then persisted on the board itself.
+
+- Build the sketch with the Arduino IDE (no editing required)
 - Upload the sketch on the board
-- Connect to the `micronova` WiFi network
-- The browser should redirect to the configuration page where you can setup your credentials
+- On first boot (or whenever the WiFi settings are reset), connect to the `PelletStove-Setup` WiFi network from your phone/PC
+- The browser should redirect to the configuration page where you can set up your WiFi credentials, together with the following MQTT parameters:
+  - **MQTT server**, the IP or hostname of your MQTT broker
+  - **MQTT port**, usually `1883`
+  - **MQTT base topic**, the name of the topic you choose to publish on
+  - **MQTT user**, if any
+  - **MQTT password**, if any
+- Once submitted, the board connects to your WiFi/MQTT broker and stores all these settings on the board's flash (LittleFS), so they are restored automatically on every subsequent reboot
+- To change the settings later on, reset the WiFi credentials (e.g. via the WiFiManager reset routine) so the `PelletStove-Setup` portal comes up again, pre-filled with the previously saved values
 
 ## MQTT topics
 - `mqtt_topic`, this is the main topic.

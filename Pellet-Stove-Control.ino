@@ -2,12 +2,18 @@
 #include <WiFiManager.h>
 #include <PubSubClient.h>
 #include <SoftwareSerial.h>
+#include <LittleFS.h>
 
-#define mqtt_server ""
-#define mqtt_port 1883
-#define mqtt_topic ""
-#define mqtt_user ""
-#define mqtt_pass ""
+#define AP_NAME "PelletStove-Setup"    // Access point name shown on first boot / config reset
+#define CONFIG_FILE "/mqtt_config.txt" // Where MQTT settings are persisted on LittleFS
+
+char mqtt_server[41] = "";
+char mqtt_port[7]    = "1883";
+char mqtt_topic[41]  = "";
+char mqtt_user[21]   = "";
+char mqtt_pass[21]   = "";
+
+bool shouldSaveConfig = false; // Set by WiFiManager when the config portal is submitted
 
 unsigned long UPDATE_PERIOD = 1800000; // 30m (in ms)
 unsigned long FAST_UPDATE_PERIOD = 60000; // 1m (in ms)
@@ -30,15 +36,28 @@ bool boot = true;
 static unsigned long loopCounter = 0;
 unsigned long previousMillis = 0;
 
-#define connection_topic mqtt_topic "/connection"
-#define state_topic mqtt_topic "/state"
-#define onoff_topic mqtt_topic "/onoff"
-#define ambtemp_topic mqtt_topic "/ambtemp"
-#define fumetemp_topic mqtt_topic "/fumetemp"
-#define flame_topic mqtt_topic "/power"
-#define fan_topic mqtt_topic "/fan"
-#define tempset_topic mqtt_topic "/tempset"
-#define cmd mqtt_topic "/cmd"
+char connection_topic[52];
+char state_topic[52];
+char onoff_topic[52];
+char ambtemp_topic[52];
+char fumetemp_topic[52];
+char flame_topic[52];
+char fan_topic[52];
+char tempset_topic[52];
+char cmd_topic[52];
+
+// mqtt_topic is only known at runtime now, so the full topics are built here instead of via macros
+void buildTopics() {
+  snprintf(connection_topic, sizeof(connection_topic), "%s/connection", mqtt_topic);
+  snprintf(state_topic,      sizeof(state_topic),      "%s/state",      mqtt_topic);
+  snprintf(onoff_topic,      sizeof(onoff_topic),      "%s/onoff",      mqtt_topic);
+  snprintf(ambtemp_topic,    sizeof(ambtemp_topic),    "%s/ambtemp",    mqtt_topic);
+  snprintf(fumetemp_topic,   sizeof(fumetemp_topic),   "%s/fumetemp",   mqtt_topic);
+  snprintf(flame_topic,      sizeof(flame_topic),      "%s/power",      mqtt_topic);
+  snprintf(fan_topic,        sizeof(fan_topic),        "%s/fan",        mqtt_topic);
+  snprintf(tempset_topic,    sizeof(tempset_topic),    "%s/tempset",    mqtt_topic);
+  snprintf(cmd_topic,        sizeof(cmd_topic),        "%s/cmd",        mqtt_topic);
+}
 
 #define device_information "{\"manufacturer\": \"Fabrizio Romanelli\",\"identifiers\": [\"7a396f39-80d2-493b-8e8e-31a70e700bc6\"],\"model\": \"Micronova Controller\",\"name\": \"Micronova Controller\",\"sw_version\": \"1.0.0.0\"}"
 
@@ -110,14 +129,76 @@ void sendCommand(const char* _cmd) {
   }
 }
 
-void setup_wifi() // Setup WiFiManager and connect to WiFi
+// Loads previously saved MQTT settings from LittleFS, if present
+bool loadConfig() {
+  if (!LittleFS.begin()) return false;
+  if (!LittleFS.exists(CONFIG_FILE)) return false;
+
+  File f = LittleFS.open(CONFIG_FILE, "r");
+  if (!f) return false;
+
+  auto readLine = [&](char* buf, size_t len) {
+    String s = f.readStringUntil('\n');
+    s.trim();
+    strncpy(buf, s.c_str(), len - 1);
+    buf[len - 1] = '\0';
+  };
+
+  readLine(mqtt_server, sizeof(mqtt_server));
+  readLine(mqtt_port, sizeof(mqtt_port));
+  readLine(mqtt_topic, sizeof(mqtt_topic));
+  readLine(mqtt_user, sizeof(mqtt_user));
+  readLine(mqtt_pass, sizeof(mqtt_pass));
+  f.close();
+
+  return strlen(mqtt_topic) > 0;
+}
+
+// Persists the current MQTT settings to LittleFS
+void saveConfig() {
+  File f = LittleFS.open(CONFIG_FILE, "w");
+  if (!f) return;
+  f.println(mqtt_server);
+  f.println(mqtt_port);
+  f.println(mqtt_topic);
+  f.println(mqtt_user);
+  f.println(mqtt_pass);
+  f.close();
+}
+
+void saveConfigCallback() {
+  shouldSaveConfig = true;
+}
+
+void setup_wifi() // Setup WiFiManager, ask for MQTT settings on first boot and connect to WiFi
 {
-  ArduinoOTA.setHostname(mqtt_topic);
-  ArduinoOTA.setPassword("micronova");
-  ArduinoOTA.begin();
+  WiFiManagerParameter custom_mqtt_server("server", "MQTT server", mqtt_server, sizeof(mqtt_server));
+  WiFiManagerParameter custom_mqtt_port("port", "MQTT port", mqtt_port, sizeof(mqtt_port));
+  WiFiManagerParameter custom_mqtt_topic("topic", "MQTT base topic", mqtt_topic, sizeof(mqtt_topic));
+  WiFiManagerParameter custom_mqtt_user("user", "MQTT user", mqtt_user, sizeof(mqtt_user));
+  WiFiManagerParameter custom_mqtt_pass("pass", "MQTT password", mqtt_pass, sizeof(mqtt_pass));
+
+  wm.addParameter(&custom_mqtt_server);
+  wm.addParameter(&custom_mqtt_port);
+  wm.addParameter(&custom_mqtt_topic);
+  wm.addParameter(&custom_mqtt_user);
+  wm.addParameter(&custom_mqtt_pass);
+  wm.setSaveConfigCallback(saveConfigCallback);
+
   WiFi.mode(WIFI_STA);
   wm.setConnectTimeout(30);
-  wm.autoConnect(mqtt_topic);
+  wm.autoConnect(AP_NAME);
+
+  strncpy(mqtt_server, custom_mqtt_server.getValue(), sizeof(mqtt_server) - 1);
+  strncpy(mqtt_port, custom_mqtt_port.getValue(), sizeof(mqtt_port) - 1);
+  strncpy(mqtt_topic, custom_mqtt_topic.getValue(), sizeof(mqtt_topic) - 1);
+  strncpy(mqtt_user, custom_mqtt_user.getValue(), sizeof(mqtt_user) - 1);
+  strncpy(mqtt_pass, custom_mqtt_pass.getValue(), sizeof(mqtt_pass) - 1);
+
+  if (shouldSaveConfig) {
+    saveConfig();
+    shouldSaveConfig = false;
+  }
 }
 
 void reconnect() {
@@ -129,7 +210,7 @@ void reconnect() {
     if (client.connect(clientId, mqtt_user, mqtt_pass)) {
       client.setBufferSize(1024);
       Serial.println("connected");
-      client.subscribe(cmd);
+      client.subscribe(cmd_topic);
       break;
     } else {
       Serial.print("failed, rc=");
@@ -368,7 +449,7 @@ void getStates() // Calls all the get…() functions
   getFlamePower();
   nonBlockingDelay(100);
   getFanSpeed();
-  nonBlockingDelay(100);
+  nonBlockingDelay(100);z
   client.publish(connection_topic, "Connected");
 }
 
@@ -376,8 +457,16 @@ void setup() {
   digitalWrite(ENABLE_RX, HIGH);
   Serial.begin(115200);
   StoveSerial.begin(1200, SERIAL_MODE, RX_PIN, TX_PIN, false, 256);
-  setup_wifi();
-  client.setServer(mqtt_server, mqtt_port);
+
+  loadConfig();   // Pre-fill defaults from LittleFS, if a config was already saved
+  setup_wifi();   // Connects to WiFi; shows the config portal (with MQTT fields) if needed
+  buildTopics();  // mqtt_topic is only known now, so build the full topic strings
+
+  ArduinoOTA.setHostname(mqtt_topic[0] ? mqtt_topic : AP_NAME);
+  ArduinoOTA.setPassword("micronova");
+  ArduinoOTA.begin();
+
+  client.setServer(mqtt_server, atoi(mqtt_port));
   client.setCallback(callback);
   pinMode(ENABLE_RX, OUTPUT);
 }
@@ -401,4 +490,3 @@ void loop() {
     if (loopCounter > FAST_LOOP_CYCLES) { fastUpdate = false; loopCounter = 0; }
   }
 }
-
