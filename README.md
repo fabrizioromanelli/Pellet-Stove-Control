@@ -118,11 +118,15 @@ The folder PCB contains the project for the Printed Circuit Board of the Pellet 
 
 Front PCB board:
 
-![PCB Front](https://user-images.githubusercontent.com/26959336/221350145-703fa86c-7866-4b43-a54f-4f3aa0b211a6.jpg)
+<img width="2388" height="1665" alt="PCB_Front" src="https://github.com/user-attachments/assets/f6eb6efa-f8fe-48b1-9549-eaa83da76f4e" />
 
 Back PCB board:
 
-![PCB Retro](https://user-images.githubusercontent.com/26959336/221350151-4c8e91c2-f829-4022-836e-27dc6b2e277f.jpg)
+<img width="2388" height="1665" alt="PCB_Back" src="https://github.com/user-attachments/assets/4567a263-318d-4a51-a17c-b71abf29fffc" />
+
+PCB Terminal plug:
+
+<img width="372" height="292" alt="PCB_Terminal" src="https://github.com/user-attachments/assets/97412892-80aa-444d-95c5-fe9f6e5163a5" />
 
 ## Micronova board pinout
 For the details related to the board pinout, refer to the manual. This project allows you to interface the stove with the serial port of the Micronova controller. Ask me in case of any doubts.
