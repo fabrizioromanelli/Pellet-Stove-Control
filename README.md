@@ -113,6 +113,16 @@ The scheme shows the serial pinout from the Micronova N100 serial port with the 
 
 The fourth pin (the leftmost on the N100 board) is not used.
 
+### Analysis of the pinout
+
+There is a 4 pin connector (CN13 or SERIALE) with 5V, 20V, Serial, GND on the stove:
+
+<img width="1794" height="747" alt="image" src="https://github.com/user-attachments/assets/c315ef4d-bf5c-4118-900a-2762f8363d59" />
+
+The above schematics has to be checked on the stove itself as it can change from one integration to another.
+If you have a multimeter, you can check it like this: put the COM of the voltmeter on the pin marked GND on my diagram and the red probe on the pin marked Serial, then move it on the pin 20V, then finally move it on the pin 5V. The results (in order) should be 5V, then 20V, then another 5V.
+5V goes to 5V (from the stove), GND to GND (from the stove) and Serial to Serial (from the stove). The 20V pin is only used if you want to power the board from a buck converter via the 3.3V pin and not by USB.
+
 ## PCB project
 The folder PCB contains the project for the Printed Circuit Board of the Pellet Stove Control.
 
