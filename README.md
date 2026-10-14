@@ -149,7 +149,7 @@ No MQTT parameter needs to be hardcoded in the sketch: everything is configured 
 
 - Build the sketch with the Arduino IDE (no editing required)
 - Upload the sketch on the board
-- On first boot (or whenever the WiFi settings are reset), connect to the `PelletStove-Setup` WiFi network from your phone/PC
+- On first boot (or whenever the WiFi settings are reset), connect to the `PelletStove-Setup` WiFi network from your phone/PC (192.168.4.1)
 - The browser should redirect to the configuration page where you can set up your WiFi credentials, together with the following MQTT parameters:
   - **MQTT server**, the IP or hostname of your MQTT broker
   - **MQTT port**, usually `1883`
@@ -158,6 +158,17 @@ No MQTT parameter needs to be hardcoded in the sketch: everything is configured 
   - **MQTT password**, if any
 - Once submitted, the board connects to your WiFi/MQTT broker and stores all these settings on the board's flash (LittleFS), so they are restored automatically on every subsequent reboot
 - To change the settings later on, reset the WiFi credentials (e.g. via the WiFiManager reset routine) so the `PelletStove-Setup` portal comes up again, pre-filled with the previously saved values
+
+Here follows some screenshots for the `PelletStove-Setup` portal:
+
+<img width="1137" height="624" alt="Screenshot 2026-09-26 155310" src="https://github.com/user-attachments/assets/1e911fdc-ba94-4c32-8eab-7b61f8121fdf" />
+
+
+WiFi network + MQTT parameters setup:
+
+
+<img width="1143" height="939" alt="Screenshot 2026-09-26 155320" src="https://github.com/user-attachments/assets/62787a29-6cd3-4a07-b843-e6e7e3c31f74" />
+
 
 ## MQTT topics
 - `mqtt_topic`, this is the main topic.
