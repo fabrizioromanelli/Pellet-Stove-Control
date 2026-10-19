@@ -196,3 +196,7 @@ Since there is no other way to set flame power/fan speed/temperature rather than
 
 ## Home Assistant
 For Home Assistant support, please contact me.
+An example of how the HA integration would look like in the Home Assistant Dashboard follows:
+
+<img width="507" height="694" alt="stove_ui_english" src="https://github.com/user-attachments/assets/de362841-d9f4-4ab8-b2a0-c1b178b3bd08" />
+
