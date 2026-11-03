@@ -1,108 +1,162 @@
+/*
+ * Pellet Stove Control - MQTT bridge for Micronova stove controllers (tested on the N100).
+ *
+ * Stove bus: single-wire serial, 1200 baud 8N2, behind the optocoupler interface shown in
+ * PCB/Schematics.png. RX_PIN only hears the bus while ENABLE_RX is LOW, so the receiver is
+ * enabled just while waiting for a reply and never sees our own transmissions.
+ *
+ * Protocol (see docs/micronova_stove_commands_mapping.xlsx):
+ *   read   ESP -> [opcode, address]                  stove -> [checksum, value]
+ *   write  ESP -> [opcode, address, value, checksum]
+ *   checksum = opcode + address + value (mod 256)
+ *
+ * MQTT topics, below the base topic set in the config portal (see README.md):
+ *   cmd (subscribed): ON, OFF, P0-P5, F0-F5, Txx, E
+ *   state, onoff, ambtemp, tempset, fumetemp, power, fan (retained), connection (not retained)
+ */
+
 #include <ArduinoOTA.h>
 #include <WiFiManager.h>
 #include <PubSubClient.h>
 #include <SoftwareSerial.h>
 #include <LittleFS.h>
 
-#define AP_NAME "PelletStove-Setup"    // Access point name shown on first boot / config reset
-#define CONFIG_FILE "/mqtt_config.txt" // Where MQTT settings are persisted on LittleFS
+// ---------------------------------------------------------------------------------------------
+// Settings
+// ---------------------------------------------------------------------------------------------
 
+#define AP_NAME      "PelletStove-Setup" // Access point of the config portal
+#define CONFIG_FILE  "/mqtt_config.txt"  // MQTT settings on LittleFS, one per line
+#define OTA_PASSWORD "micronova"
+
+const unsigned long UPDATE_PERIOD      = 1800000; // 30 min between two polls...
+const unsigned long FAST_UPDATE_PERIOD = 60000;   // ...1 min after a command,
+const uint8_t       FAST_LOOP_CYCLES   = 30;      // for this many polls
+
+const unsigned long PORTAL_TIMEOUT_S = 180; // Restart when the config portal is left idle
+
+// Target temperature range for the Txx command (°C): values outside are clamped
+const uint8_t TEMP_SET_MIN = 10;
+const uint8_t TEMP_SET_MAX = 40;
+
+#if defined(ESP32)
+// ESP32 DevKit. ENABLE_RX must be output capable: GPIO34-39 are input only.
+const uint8_t RX_PIN    = 32;
+const uint8_t TX_PIN    = 33;
+const uint8_t ENABLE_RX = 25;
+#else
+// Wemos D1 mini, as on the project PCB
+const uint8_t RX_PIN    = D3; // GPIO0
+const uint8_t TX_PIN    = D4; // GPIO2
+const uint8_t ENABLE_RX = D2; // GPIO4, LOW = receiver enabled
+#endif
+
+// ---------------------------------------------------------------------------------------------
+// Stove protocol
+// ---------------------------------------------------------------------------------------------
+
+// Opcodes: memory area to read from, or to write to
+const uint8_t RAM_READ     = 0x00;
+const uint8_t RAM_WRITE    = 0x80;
+const uint8_t EEPROM_READ  = 0x20;
+const uint8_t EEPROM_WRITE = 0xA0;
+
+// RAM addresses
+const uint8_t stoveStateAddr  = 0x21; // Stove state, see STOVE_STATES
+const uint8_t ambTempAddr     = 0x01; // Ambient temperature, 0.5 °C steps
+const uint8_t fumesTempAddr   = 0x3E; // Flue gas temperature, °C
+const uint8_t stovePOnOffAddr = 0x58; // Writing 0x5A here works like the power button
+
+// EEPROM addresses
+const uint8_t powerSetAddr = 0x89; // Flame power, 0-5
+const uint8_t fanSetAddr   = 0x8A; // Fan speed, 0-5 (0 = auto)
+const uint8_t tempSetAddr  = 0x8B; // Target temperature, °C
+
+// Bus timings (ms)
+const unsigned long BYTE_GAP_MS      = 1;   // Between the bytes we send
+const unsigned long REPLY_DELAY_MS   = 80;  // Listening before collecting a reply...
+const unsigned long REPLY_TIMEOUT_MS = 200; // ...then waiting at most this for its 2 bytes
+const unsigned long WRITE_SETTLE_MS  = 50;  // After a write frame
+const unsigned long READ_GAP_MS      = 100; // After each register read
+
+// ---------------------------------------------------------------------------------------------
+// MQTT
+// ---------------------------------------------------------------------------------------------
+
+// Sub-topics, appended to the base topic as "<base>/<sub-topic>"
+#define TOPIC_CMD        "cmd"
+#define TOPIC_CONNECTION "connection" // Longest one, sizes the topic buffers
+#define TOPIC_STATE      "state"
+#define TOPIC_ONOFF      "onoff"
+#define TOPIC_AMBTEMP    "ambtemp"
+#define TOPIC_TEMPSET    "tempset"
+#define TOPIC_FUMETEMP   "fumetemp"
+#define TOPIC_POWER      "power"
+#define TOPIC_FAN        "fan"
+
+// Stove states: text published on "state" and the matching "onoff" value (nullptr = none)
+struct StoveState { const char *text; const char *onoff; };
+const StoveState STOVE_STATES[] = {
+  {"Spenta",             "OFF"},   // 0  Off
+  {"Avvio",              "ON"},    // 1  Start-up
+  {"Caricamento pellet", "ON"},    // 2  Pellet loading
+  {"Accensione",         "ON"},    // 3  Ignition
+  {"Accesa",             "ON"},    // 4  Running
+  {"Pulizia braciere",   nullptr}, // 5  Brazier cleaning
+  {"Pulizia finale",     "OFF"},   // 6  Final cleaning
+  {"Standby",            "OFF"},   // 7  Standby
+  {"Pellet mancante",    nullptr}, // 8  Out of pellets
+  {"Mancata accensione", "OFF"},   // 9  Ignition failure
+  {"Allarme",            nullptr}, // 10 Alarm
+};
+const unsigned long ONOFF_DELAY_MS = 1000; // Between publishing "state" and "onoff"
+
+// Registers read by every poll, in this order
+enum ValueFormat : uint8_t { STATE_TEXT, HALF_DEGREES, INTEGER };
+struct PolledRegister { uint8_t opcode, address; const char *topic; ValueFormat format; };
+const PolledRegister POLLED_REGISTERS[] = {
+  {RAM_READ,    stoveStateAddr, TOPIC_STATE,    STATE_TEXT},
+  {RAM_READ,    ambTempAddr,    TOPIC_AMBTEMP,  HALF_DEGREES},
+  {EEPROM_READ, tempSetAddr,    TOPIC_TEMPSET,  INTEGER},
+  {RAM_READ,    fumesTempAddr,  TOPIC_FUMETEMP, INTEGER},
+  {EEPROM_READ, powerSetAddr,   TOPIC_POWER,    INTEGER},
+  {EEPROM_READ, fanSetAddr,     TOPIC_FAN,      INTEGER},
+};
+
+// ---------------------------------------------------------------------------------------------
+// State
+// ---------------------------------------------------------------------------------------------
+
+// MQTT settings, from the config portal or CONFIG_FILE
 char mqtt_server[41] = "";
 char mqtt_port[7]    = "1883";
-char mqtt_topic[41]  = "";
-char mqtt_user[21]   = "";
-char mqtt_pass[21]   = "";
-
-bool shouldSaveConfig = false; // Set by WiFiManager when the config portal is submitted
-
-unsigned long UPDATE_PERIOD = 1800000; // 30m (in ms)
-unsigned long FAST_UPDATE_PERIOD = 60000; // 1m (in ms)
-
-#define FAST_LOOP_CYCLES 30
+char mqtt_topic[41]  = ""; // Base topic
+char mqtt_user[65]   = "";
+char mqtt_pass[65]   = "";
 
 SoftwareSerial StoveSerial;
-#define SERIAL_MODE SWSERIAL_8N2
-#define RX_PIN D3
-#define TX_PIN D4
-#define ENABLE_RX D2
-
 WiFiClient espClient;
 PubSubClient client(espClient);
-WiFiManager wm;
 
-static volatile bool sem = false;
-bool fastUpdate = false;
-bool boot = true;
-static unsigned long loopCounter = 0;
-unsigned long previousMillis = 0;
+// Commands from MQTT wait here until loop() sends them: callback() may run in the middle of
+// a stove exchange (see nonBlockingDelay()), when the bus is busy
+struct StoveCommand { uint8_t opcode, address, value; const char *onoff; };
+const uint8_t CMD_QUEUE_SIZE = 8;
+StoveCommand cmdQueue[CMD_QUEUE_SIZE];
+uint8_t cmdHead = 0, cmdCount = 0;
 
-char connection_topic[52];
-char state_topic[52];
-char onoff_topic[52];
-char ambtemp_topic[52];
-char fumetemp_topic[52];
-char flame_topic[52];
-char fan_topic[52];
-char tempset_topic[52];
-char cmd_topic[52];
+unsigned long lastPollMillis = 0;
+uint8_t fastPollsLeft = 0;     // Polls still due at the fast rate
+bool pollPending = false;      // Poll at once (set on every MQTT connection)
+bool shouldSaveConfig = false; // Set whenever the config portal form is submitted
 
-// mqtt_topic is only known at runtime now, so the full topics are built here instead of via macros
-void buildTopics() {
-  snprintf(connection_topic, sizeof(connection_topic), "%s/connection", mqtt_topic);
-  snprintf(state_topic,      sizeof(state_topic),      "%s/state",      mqtt_topic);
-  snprintf(onoff_topic,      sizeof(onoff_topic),      "%s/onoff",      mqtt_topic);
-  snprintf(ambtemp_topic,    sizeof(ambtemp_topic),    "%s/ambtemp",    mqtt_topic);
-  snprintf(fumetemp_topic,   sizeof(fumetemp_topic),   "%s/fumetemp",   mqtt_topic);
-  snprintf(flame_topic,      sizeof(flame_topic),      "%s/power",      mqtt_topic);
-  snprintf(fan_topic,        sizeof(fan_topic),        "%s/fan",        mqtt_topic);
-  snprintf(tempset_topic,    sizeof(tempset_topic),    "%s/tempset",    mqtt_topic);
-  snprintf(cmd_topic,        sizeof(cmd_topic),        "%s/cmd",        mqtt_topic);
-}
+// ---------------------------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------------------------
 
-#define device_information "{\"manufacturer\": \"Fabrizio Romanelli\",\"identifiers\": [\"7a396f39-80d2-493b-8e8e-31a70e700bc6\"],\"model\": \"Micronova Controller\",\"name\": \"Micronova Controller\",\"sw_version\": \"1.0.0.0\"}"
-
-#define _RAMR 0x00
-#define _RAMW 0x80
-#define stoveStateAddr 0x21
-#define ambTempAddr 0x01
-#define fumesTempAddr 0x3E
-#define stovePOnOffAddr 0x58
-
-#define _EEPROMR 0x20
-#define _EEPROMW 0xA0
-#define powerSetAddr 0x89
-#define fanSetAddr 0x8A
-#define tempSetAddr 0x8B
-
-// Checksum: Code+Address+Value (hex)
-const char stoveOnOff[4] = {_RAMW, stovePOnOffAddr, 0x5A, (char)(_RAMW + stovePOnOffAddr + 0x5A)};
-const char stoveOff[4] = {_RAMW, stoveStateAddr, 0x00, (char)(_RAMW + stoveStateAddr + 0x00)};
-
-const char stovePW[6][4] = {
-{_EEPROMW, powerSetAddr, 0x00, (char)(_EEPROMW + powerSetAddr + 0x00)},
-{_EEPROMW, powerSetAddr, 0x01, (char)(_EEPROMW + powerSetAddr + 0x01)},
-{_EEPROMW, powerSetAddr, 0x02, (char)(_EEPROMW + powerSetAddr + 0x02)},
-{_EEPROMW, powerSetAddr, 0x03, (char)(_EEPROMW + powerSetAddr + 0x03)},
-{_EEPROMW, powerSetAddr, 0x04, (char)(_EEPROMW + powerSetAddr + 0x04)},
-{_EEPROMW, powerSetAddr, 0x05, (char)(_EEPROMW + powerSetAddr + 0x05)}
-};
-
-const char stoveFN[6][4] = {
-{_EEPROMW, fanSetAddr, 0x00, (char)(_EEPROMW + fanSetAddr + 0x00)},
-{_EEPROMW, fanSetAddr, 0x01, (char)(_EEPROMW + fanSetAddr + 0x01)},
-{_EEPROMW, fanSetAddr, 0x02, (char)(_EEPROMW + fanSetAddr + 0x02)},
-{_EEPROMW, fanSetAddr, 0x03, (char)(_EEPROMW + fanSetAddr + 0x03)},
-{_EEPROMW, fanSetAddr, 0x04, (char)(_EEPROMW + fanSetAddr + 0x04)},
-{_EEPROMW, fanSetAddr, 0x05, (char)(_EEPROMW + fanSetAddr + 0x05)}
-};
-
-uint8_t stoveState, tempSet, fumesTemp, flamePower, fanSpeed;
-float ambTemp;
-char stoveRxData[2];  // When the stove is sending data, it sends two bytes: a checksum and the value
-
-// Utility: non-blocking delay
+// Waits while keeping MQTT and OTA alive. Incoming commands are queued, see callback().
 void nonBlockingDelay(unsigned long ms) {
-  unsigned long start = millis();
+  const unsigned long start = millis();
   while (millis() - start < ms) {
     client.loop();
     ArduinoOTA.handle();
@@ -110,383 +164,281 @@ void nonBlockingDelay(unsigned long ms) {
   }
 }
 
-void setSemaphore(bool value) {
-  noInterrupts();
-  sem = value;
-  interrupts();
+// Copies src into dst (size bytes) without leading/trailing whitespace
+void copyTrimmed(char *dst, const char *src, size_t size) {
+  while (isspace((unsigned char)*src)) src++;
+  size_t len = strlen(src);
+  while (len > 0 && isspace((unsigned char)src[len - 1])) len--;
+  if (len >= size) len = size - 1;
+  memcpy(dst, src, len);
+  dst[len] = '\0';
 }
 
-// Main function to send commands
-void sendCommand(const char* _cmd) {
-  if (!sem) {
-    setSemaphore(true);
-  for (int i = 0; i < 4; i++) {
-    StoveSerial.write(_cmd[i]);
-    nonBlockingDelay(1);
+// Publishes on "<base>/<subTopic>"
+void publish(const char *subTopic, const char *payload, bool retained = true) {
+  char topic[sizeof(mqtt_topic) + sizeof("/" TOPIC_CONNECTION)];
+  snprintf(topic, sizeof(topic), "%s/%s", mqtt_topic, subTopic);
+  client.publish(topic, payload, retained);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Stove I/O
+// ---------------------------------------------------------------------------------------------
+
+void writeRegister(uint8_t opcode, uint8_t address, uint8_t value) {
+  const uint8_t frame[] = {opcode, address, value, (uint8_t)(opcode + address + value)};
+  for (uint8_t b : frame) {
+    StoveSerial.write(b);
+    delay(BYTE_GAP_MS); // Plain delay: nothing else runs in the middle of a frame
   }
-  nonBlockingDelay(50);
-  setSemaphore(false);
+  nonBlockingDelay(WRITE_SETTLE_MS);
+}
+
+// Returns the register value, or -1 if no valid reply arrived
+int readRegister(uint8_t opcode, uint8_t address) {
+  while (StoveSerial.available()) StoveSerial.read(); // Drop stale bytes (late replies, noise)
+
+  StoveSerial.write(opcode);
+  delay(BYTE_GAP_MS);
+  StoveSerial.write(address);
+  digitalWrite(ENABLE_RX, LOW);
+  nonBlockingDelay(REPLY_DELAY_MS);
+
+  uint8_t reply[2]; // [checksum, value]
+  uint8_t count = 0;
+  const unsigned long start = millis();
+  while (count < 2 && millis() - start < REPLY_TIMEOUT_MS) {
+    if (StoveSerial.available()) reply[count++] = StoveSerial.read();
+    else yield();
+  }
+  digitalWrite(ENABLE_RX, HIGH);
+
+  // The checksum must match this very register, otherwise the reply is not ours
+  if (count < 2 || (uint8_t)(reply[0] - reply[1]) != (uint8_t)(opcode + address)) return -1;
+  return reply[1];
+}
+
+void publishValue(const PolledRegister &reg, uint8_t value) {
+  char text[8];
+  switch (reg.format) {
+    case STATE_TEXT:
+      if (value >= sizeof(STOVE_STATES) / sizeof(STOVE_STATES[0])) return; // Unknown state
+      publish(reg.topic, STOVE_STATES[value].text);
+      if (STOVE_STATES[value].onoff) {
+        nonBlockingDelay(ONOFF_DELAY_MS);
+        publish(TOPIC_ONOFF, STOVE_STATES[value].onoff);
+      }
+      return;
+    case HALF_DEGREES: // e.g. 41 -> "20.50"
+      snprintf(text, sizeof(text), "%d.%s", value / 2, (value & 1) ? "50" : "00");
+      break;
+    default:
+      snprintf(text, sizeof(text), "%d", value);
+      break;
+  }
+  publish(reg.topic, text);
+}
+
+void pollStove() {
+  for (const PolledRegister &reg : POLLED_REGISTERS) {
+    const int value = readRegister(reg.opcode, reg.address);
+    if (value >= 0) publishValue(reg, value);
+    nonBlockingDelay(READ_GAP_MS);
+  }
+  publish(TOPIC_CONNECTION, "Connected", false);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Commands
+// ---------------------------------------------------------------------------------------------
+
+// onoff ("ON"/"OFF") is published on the onoff topic once the command has been sent
+void queueCommand(uint8_t opcode, uint8_t address, uint8_t value, const char *onoff = nullptr) {
+  if (cmdCount == CMD_QUEUE_SIZE) {
+    Serial.println(F("Command queue full, command dropped"));
+    return;
+  }
+  cmdQueue[(cmdHead + cmdCount) % CMD_QUEUE_SIZE] = {opcode, address, value, onoff};
+  cmdCount++;
+  fastPollsLeft = FAST_LOOP_CYCLES; // Follow the stove closely for a while
+}
+
+void sendQueuedCommands() {
+  while (cmdCount > 0) {
+    const StoveCommand cmd = cmdQueue[cmdHead];
+    cmdHead = (cmdHead + 1) % CMD_QUEUE_SIZE;
+    cmdCount--;
+    writeRegister(cmd.opcode, cmd.address, cmd.value); // May queue further commands meanwhile
+    if (cmd.onoff) publish(TOPIC_ONOFF, cmd.onoff);
   }
 }
 
-// Loads previously saved MQTT settings from LittleFS, if present
-bool loadConfig() {
-  if (!LittleFS.begin()) return false;
-  if (!LittleFS.exists(CONFIG_FILE)) return false;
+// Handles "<base>/cmd". Invalid commands are ignored.
+void callback(char *, byte *payload, unsigned int length) {
+  if (length == 0) return;
+  const uint8_t arg = length > 1 ? payload[1] : 0;
 
+  switch (payload[0]) {
+    case 'O': // ON / OFF (only the first two characters matter)
+      if (arg == 'N') queueCommand(RAM_WRITE, stovePOnOffAddr, 0x5A, "ON");
+      else if (arg == 'F') queueCommand(RAM_WRITE, stoveStateAddr, 0x00, "OFF");
+      break;
+    case 'P': // P0-P5: flame power
+    case 'F': // F0-F5: fan speed
+      if (length == 2 && arg >= '0' && arg <= '5')
+        queueCommand(EEPROM_WRITE, payload[0] == 'P' ? powerSetAddr : fanSetAddr, arg - '0');
+      break;
+    case 'T': // Txx: target temperature, two digits
+      if (length == 3 && isdigit(arg) && isdigit(payload[2])) {
+        const int temp = (arg - '0') * 10 + (payload[2] - '0');
+        queueCommand(EEPROM_WRITE, tempSetAddr, constrain(temp, TEMP_SET_MIN, TEMP_SET_MAX));
+      }
+      break;
+    case 'E': // Error reset: same frame as OFF
+      queueCommand(RAM_WRITE, stoveStateAddr, 0x00, "OFF");
+      break;
+  }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Connectivity
+// ---------------------------------------------------------------------------------------------
+
+// The MQTT settings, in CONFIG_FILE line order
+struct ConfigField { char *value; size_t size; };
+const ConfigField CONFIG_FIELDS[] = {
+  {mqtt_server, sizeof(mqtt_server)},
+  {mqtt_port,   sizeof(mqtt_port)},
+  {mqtt_topic,  sizeof(mqtt_topic)},
+  {mqtt_user,   sizeof(mqtt_user)},
+  {mqtt_pass,   sizeof(mqtt_pass)},
+};
+const size_t CONFIG_FIELD_COUNT = sizeof(CONFIG_FIELDS) / sizeof(CONFIG_FIELDS[0]);
+
+void loadConfig() {
+  if (!LittleFS.exists(CONFIG_FILE)) return;
   File f = LittleFS.open(CONFIG_FILE, "r");
-  if (!f) return false;
-
-  auto readLine = [&](char* buf, size_t len) {
-    String s = f.readStringUntil('\n');
-    s.trim();
-    strncpy(buf, s.c_str(), len - 1);
-    buf[len - 1] = '\0';
-  };
-
-  readLine(mqtt_server, sizeof(mqtt_server));
-  readLine(mqtt_port, sizeof(mqtt_port));
-  readLine(mqtt_topic, sizeof(mqtt_topic));
-  readLine(mqtt_user, sizeof(mqtt_user));
-  readLine(mqtt_pass, sizeof(mqtt_pass));
+  if (!f) return;
+  for (const ConfigField &field : CONFIG_FIELDS)
+    copyTrimmed(field.value, f.readStringUntil('\n').c_str(), field.size);
   f.close();
-
-  return strlen(mqtt_topic) > 0;
 }
 
-// Persists the current MQTT settings to LittleFS
 void saveConfig() {
   File f = LittleFS.open(CONFIG_FILE, "w");
   if (!f) return;
-  f.println(mqtt_server);
-  f.println(mqtt_port);
-  f.println(mqtt_topic);
-  f.println(mqtt_user);
-  f.println(mqtt_pass);
+  for (const ConfigField &field : CONFIG_FIELDS) f.println(field.value);
   f.close();
 }
 
-void saveConfigCallback() {
-  shouldSaveConfig = true;
-}
+// Connects to WiFi. The config portal, which also asks for the MQTT settings (pre-filled with
+// the saved ones), opens when no saved network is reachable or the MQTT settings are missing.
+void setupWifi() {
+  // Same order as CONFIG_FIELDS. The portal is an open access point, so the saved password is
+  // never shown: an empty password field keeps it.
+  WiFiManagerParameter fields[] = {
+    {"server", "MQTT server",     mqtt_server, sizeof(mqtt_server) - 1},
+    {"port",   "MQTT port",       mqtt_port,   sizeof(mqtt_port) - 1},
+    {"topic",  "MQTT base topic", mqtt_topic,  sizeof(mqtt_topic) - 1},
+    {"user",   "MQTT user",       mqtt_user,   sizeof(mqtt_user) - 1},
+    {"pass",   "MQTT password (empty = keep the saved one)", "", sizeof(mqtt_pass) - 1,
+     "type=\"password\""},
+  };
+  static_assert(sizeof(fields) / sizeof(fields[0]) == CONFIG_FIELD_COUNT, "one field per setting");
 
-void setup_wifi() // Setup WiFiManager, ask for MQTT settings on first boot and connect to WiFi
-{
-  WiFiManagerParameter custom_mqtt_server("server", "MQTT server", mqtt_server, sizeof(mqtt_server));
-  WiFiManagerParameter custom_mqtt_port("port", "MQTT port", mqtt_port, sizeof(mqtt_port));
-  WiFiManagerParameter custom_mqtt_topic("topic", "MQTT base topic", mqtt_topic, sizeof(mqtt_topic));
-  WiFiManagerParameter custom_mqtt_user("user", "MQTT user", mqtt_user, sizeof(mqtt_user));
-  WiFiManagerParameter custom_mqtt_pass("pass", "MQTT password", mqtt_pass, sizeof(mqtt_pass));
-
-  wm.addParameter(&custom_mqtt_server);
-  wm.addParameter(&custom_mqtt_port);
-  wm.addParameter(&custom_mqtt_topic);
-  wm.addParameter(&custom_mqtt_user);
-  wm.addParameter(&custom_mqtt_pass);
-  wm.setSaveConfigCallback(saveConfigCallback);
+  WiFiManager wm; // Only needed here: released on return
+  for (WiFiManagerParameter &field : fields) wm.addParameter(&field);
+  wm.setSaveParamsCallback([] { shouldSaveConfig = true; }); // On every form submit
+  wm.setConnectTimeout(30);
+  // Without a timeout the portal would wait forever, e.g. when the router is still booting
+  // after a power cut: restart instead and try the saved network again
+  wm.setConfigPortalTimeout(PORTAL_TIMEOUT_S);
 
   WiFi.mode(WIFI_STA);
-  wm.setConnectTimeout(30);
-  wm.autoConnect(AP_NAME);
+  // Server and base topic are mandatory: ask for them even if the WiFi network is known
+  // (e.g. boards updated from the firmware versions with hardcoded MQTT settings)
+  const bool connected = mqtt_server[0] && mqtt_topic[0] ? wm.autoConnect(AP_NAME)
+                                                         : wm.startConfigPortal(AP_NAME);
 
-  strncpy(mqtt_server, custom_mqtt_server.getValue(), sizeof(mqtt_server) - 1);
-  strncpy(mqtt_port, custom_mqtt_port.getValue(), sizeof(mqtt_port) - 1);
-  strncpy(mqtt_topic, custom_mqtt_topic.getValue(), sizeof(mqtt_topic) - 1);
-  strncpy(mqtt_user, custom_mqtt_user.getValue(), sizeof(mqtt_user) - 1);
-  strncpy(mqtt_pass, custom_mqtt_pass.getValue(), sizeof(mqtt_pass) - 1);
+  for (size_t i = 0; i < CONFIG_FIELD_COUNT; i++) {
+    const char *value = fields[i].getValue();
+    if (CONFIG_FIELDS[i].value == mqtt_pass && !value[0]) continue; // Keep the saved password
+    copyTrimmed(CONFIG_FIELDS[i].value, value, CONFIG_FIELDS[i].size);
+  }
+  if (shouldSaveConfig) saveConfig();
 
-  if (shouldSaveConfig) {
-    saveConfig();
-    shouldSaveConfig = false;
+  if (!connected) {
+    Serial.println(F("No WiFi, restarting"));
+    ESP.restart();
   }
 }
 
-void reconnect() {
-  unsigned long startAttemptTime = millis();
-  while (!client.connected() && millis() - startAttemptTime < 30000) { // 30 seconds timeout
-    Serial.print("Attempting MQTT connection...");
+// Tries to connect to the broker for up to 30 s, every 5 s. Returns true once connected.
+bool reconnect() {
+  const unsigned long start = millis();
+  do {
+    Serial.print(F("Attempting MQTT connection..."));
     char clientId[15];
-    snprintf(clientId, sizeof(clientId), "ESPClient-%X", random(0xffff));
-    if (client.connect(clientId, mqtt_user, mqtt_pass)) {
-      client.setBufferSize(1024);
-      Serial.println("connected");
-      client.subscribe(cmd_topic);
-      break;
-    } else {
-      Serial.print("failed, rc=");
-      Serial.println(client.state());
-      nonBlockingDelay(5000); // Wait before retrying
+    snprintf(clientId, sizeof(clientId), "ESPClient-%X", (unsigned)random(0xffff));
+    // Credentials are sent only when a user is configured
+    const char *user = mqtt_user[0] ? mqtt_user : nullptr;
+    if (client.connect(clientId, user, user ? mqtt_pass : nullptr)) {
+      Serial.println(F("connected"));
+      char topic[sizeof(mqtt_topic) + sizeof("/" TOPIC_CMD)];
+      snprintf(topic, sizeof(topic), "%s/" TOPIC_CMD, mqtt_topic);
+      client.subscribe(topic);
+      return true;
     }
-  }
+    Serial.print(F("failed, rc="));
+    Serial.println(client.state());
+    nonBlockingDelay(5000);
+  } while (millis() - start < 30000);
+  return false;
 }
 
-// This is the callback from a topic arrived via MQTT
-void callback(char *topic, byte *payload, unsigned int length) {
-  if (length == 0) return;
-
-  if (payload[0] == 'O' && length >= 2) {
-    if (payload[1] == 'N') {
-      sendCommand(stoveOnOff);
-      client.publish(onoff_topic, "ON", true);
-    } else if (payload[1] == 'F') {
-      sendCommand(stoveOff);
-      client.publish(onoff_topic, "OFF", true);
-    }
-    fastUpdate = true;
-  }
-  else if (payload[0] == 'P' && length == 2) {
-    int idx = payload[1] - '0';
-    if (idx >= 0 && idx <= 5) sendCommand(stovePW[idx]);
-    fastUpdate = true;
-  }
-  else if (payload[0] == 'F' && length == 2) {
-    int idx = payload[1] - '0';
-    if (idx >= 0 && idx <= 5) sendCommand(stoveFN[idx]);
-    fastUpdate = true;
-  }
-  else if (payload[0] == 'T' && length == 3) {
-    char t[3] = {(char)payload[1], (char)payload[2], '\0'};
-    char tempValue = (char)strtol(t, NULL, 10);
-    const char temperatureSet[4] = {_EEPROMW, tempSetAddr, tempValue, (char)(_EEPROMW + tempSetAddr + tempValue)};
-    sendCommand(temperatureSet);
-    fastUpdate = true;
-  }
-  else if (payload[0] == 'E') {
-    sendCommand(stoveOff);
-    client.publish(onoff_topic, "OFF", true);
-    fastUpdate = true;
-  }
-}
-
-void checkStoveReply(unsigned long timeout = 200) {
-  unsigned long start = millis();
-  uint8_t rxCount = 0;
-  stoveRxData[0] = 0x00;
-  stoveRxData[1] = 0x00;
-
-  while (millis() - start < timeout) {
-    if (StoveSerial.available()) { // It has to be exactly 2 bytes, otherwise it's an error
-      stoveRxData[rxCount++] = StoveSerial.read();
-      if (rxCount == 2) break;
-    }
-    yield();
-  }
-  digitalWrite(ENABLE_RX, HIGH);
-
-  if (rxCount == 2) {
-    byte val = stoveRxData[1];
-    byte checksum = stoveRxData[0];
-    byte param = checksum - val;
-    switch (param)
-    {
-      // RAM Cases
-      case stoveStateAddr:
-        stoveState = val;
-        switch (stoveState)
-        {
-          case 0:
-            client.publish(state_topic, "Spenta", true);
-            nonBlockingDelay(1000);
-            client.publish(onoff_topic, "OFF", true);
-            break;
-          case 1:
-            client.publish(state_topic, "Avvio", true);
-            nonBlockingDelay(1000);
-            client.publish(onoff_topic, "ON", true);
-            break;
-          case 2:
-            client.publish(state_topic, "Caricamento pellet", true);
-            nonBlockingDelay(1000);
-            client.publish(onoff_topic, "ON", true);
-            break;
-          case 3:
-            client.publish(state_topic, "Accensione", true);
-            nonBlockingDelay(1000);
-            client.publish(onoff_topic, "ON", true);
-            break;
-          case 4:
-            client.publish(state_topic, "Accesa", true);
-            nonBlockingDelay(1000);
-            client.publish(onoff_topic, "ON", true);
-            break;
-          case 5:
-            client.publish(state_topic, "Pulizia braciere", true);
-            break;
-          case 6:
-            client.publish(state_topic, "Pulizia finale", true);
-            nonBlockingDelay(1000);
-            client.publish(onoff_topic, "OFF", true);
-            break;
-          case 7:
-            client.publish(state_topic, "Standby", true);
-            nonBlockingDelay(1000);
-            client.publish(onoff_topic, "OFF", true);
-            break;
-          case 8:
-            client.publish(state_topic, "Pellet mancante", true);
-            break;
-          case 9:
-            client.publish(state_topic, "Mancata accensione", true);
-            nonBlockingDelay(1000);
-            client.publish(onoff_topic, "OFF", true);
-            break;
-          case 10:
-            client.publish(state_topic, "Allarme", true);
-            break;
-        }
-        break;
-      case ambTempAddr:
-        ambTemp = (float)val / 2;
-        char ambTempStr[10];
-        dtostrf(ambTemp, 4, 2, ambTempStr);
-        client.publish(ambtemp_topic, ambTempStr, true);
-        break;
-      case fumesTempAddr:
-        fumesTemp = val;
-        char fumesTempStr[10];
-        sprintf(fumesTempStr, "%d", fumesTemp);
-        client.publish(fumetemp_topic, fumesTempStr, true);
-        break;
-      // EEPROM Cases
-      case tempSetAddr + _EEPROMR:
-        tempSet = val;
-        char tempSetStr[10];
-        sprintf(tempSetStr, "%d", tempSet);
-        client.publish(tempset_topic, tempSetStr, true);
-        break;
-      case powerSetAddr + _EEPROMR:
-        flamePower = val;
-        char flamePowerStr[10];
-        sprintf(flamePowerStr, "%d", flamePower);
-        client.publish(flame_topic, flamePowerStr, true);
-        break;
-      case fanSetAddr + _EEPROMR:
-        fanSpeed = val;
-        char fanSpeedStr[10];
-        sprintf(fanSpeedStr, "%d", fanSpeed);
-        client.publish(fan_topic, fanSpeedStr, true);
-        break;
-    }
-  }
-}
-
-void getStoveState() // Get detailed stove state
-{
-  const byte readByte = _RAMR;
-  StoveSerial.write(readByte);
-  nonBlockingDelay(1);
-  StoveSerial.write(stoveStateAddr);
-  digitalWrite(ENABLE_RX, LOW);
-  nonBlockingDelay(80);
-  checkStoveReply();
-}
-
-void getAmbTemp() // Get room temperature
-{
-  const byte readByte = _RAMR;
-  StoveSerial.write(readByte);
-  nonBlockingDelay(1);
-  StoveSerial.write(ambTempAddr);
-  digitalWrite(ENABLE_RX, LOW);
-  nonBlockingDelay(80);
-  checkStoveReply();
-}
-
-void getFumeTemp() // Get flue gas temperature
-{
-  const byte readByte = _RAMR;
-  StoveSerial.write(readByte);
-  nonBlockingDelay(1);
-  StoveSerial.write(fumesTempAddr);
-  digitalWrite(ENABLE_RX, LOW);
-  nonBlockingDelay(80);
-  checkStoveReply();
-}
-
-void getFlamePower() // Get the flame power
-{
-  const byte readByte = _EEPROMR;
-  StoveSerial.write(readByte);
-  nonBlockingDelay(1);
-  StoveSerial.write(powerSetAddr);
-  digitalWrite(ENABLE_RX, LOW);
-  nonBlockingDelay(80);
-  checkStoveReply();
-}
-
-void getFanSpeed() // Get the fan speed
-{
-  const byte readByte = _EEPROMR;
-  StoveSerial.write(readByte);
-  nonBlockingDelay(1);
-  StoveSerial.write(fanSetAddr);
-  digitalWrite(ENABLE_RX, LOW);
-  nonBlockingDelay(80);
-  checkStoveReply();
-}
-
-void getTempSet() // Get the thermostat setting
-{
-  const byte readByte = _EEPROMR;
-  StoveSerial.write(readByte);
-  nonBlockingDelay(1);
-  StoveSerial.write(tempSetAddr);
-  digitalWrite(ENABLE_RX, LOW);
-  nonBlockingDelay(80);
-  checkStoveReply();
-}
-
-void getStates() // Calls all the get…() functions
-{
-  getStoveState();
-  nonBlockingDelay(100);
-  getAmbTemp();
-  nonBlockingDelay(100);
-  getTempSet();
-  nonBlockingDelay(100);
-  getFumeTemp();
-  nonBlockingDelay(100);
-  getFlamePower();
-  nonBlockingDelay(100);
-  getFanSpeed();
-  nonBlockingDelay(100);
-  client.publish(connection_topic, "Connected");
-}
+// ---------------------------------------------------------------------------------------------
 
 void setup() {
-  digitalWrite(ENABLE_RX, HIGH);
+  pinMode(ENABLE_RX, OUTPUT);
+  digitalWrite(ENABLE_RX, HIGH); // Receiver disabled until a reply is expected
   Serial.begin(115200);
-  StoveSerial.begin(1200, SERIAL_MODE, RX_PIN, TX_PIN, false, 256);
+  // RX only collects the 2-byte replies, so a small buffer is plenty
+  StoveSerial.begin(1200, SWSERIAL_8N2, RX_PIN, TX_PIN, false, 64);
 
-  loadConfig();   // Pre-fill defaults from LittleFS, if a config was already saved
-  setup_wifi();   // Connects to WiFi; shows the config portal (with MQTT fields) if needed
-  buildTopics();  // mqtt_topic is only known now, so build the full topic strings
+#if defined(ESP32)
+  const bool fsMounted = LittleFS.begin(true); // Formats the partition on first use
+#else
+  const bool fsMounted = LittleFS.begin();     // Formats automatically when needed
+#endif
+  if (fsMounted) loadConfig();
+  else Serial.println(F("LittleFS not available: MQTT settings won't be saved"));
 
-  ArduinoOTA.setHostname(mqtt_topic[0] ? mqtt_topic : AP_NAME);
-  ArduinoOTA.setPassword("micronova");
+  setupWifi();
+
+  // OTA host name: the base topic, without the '/' host names can't contain
+  char hostname[sizeof(mqtt_topic)];
+  strlcpy(hostname, mqtt_topic[0] ? mqtt_topic : AP_NAME, sizeof(hostname));
+  for (char *p = hostname; *p; p++) if (*p == '/') *p = '_';
+  ArduinoOTA.setHostname(hostname);
+  ArduinoOTA.setPassword(OTA_PASSWORD);
   ArduinoOTA.begin();
 
   client.setServer(mqtt_server, atoi(mqtt_port));
   client.setCallback(callback);
-  pinMode(ENABLE_RX, OUTPUT);
 }
 
 void loop() {
-  if (!client.connected()) reconnect();
-  client.loop();
+  if (!client.connected() && reconnect()) pollPending = true; // Refresh every topic
+  client.loop(); // Delivers MQTT commands to callback()
   ArduinoOTA.handle();
 
-  unsigned long updatePeriod = fastUpdate ? FAST_UPDATE_PERIOD : UPDATE_PERIOD;
-  if ((millis() - previousMillis > updatePeriod) || boot) {
-    boot = false;
-    previousMillis = millis();
-    if (!sem) {
-      setSemaphore(true);
-      getStates();
-      setSemaphore(false);
-    }
-    client.publish(connection_topic, "Connected");
-    if (fastUpdate) loopCounter++;
-    if (loopCounter > FAST_LOOP_CYCLES) { fastUpdate = false; loopCounter = 0; }
+  sendQueuedCommands();
+
+  const unsigned long period = fastPollsLeft ? FAST_UPDATE_PERIOD : UPDATE_PERIOD;
+  if (client.connected() && (pollPending || millis() - lastPollMillis > period)) {
+    pollPending = false;
+    lastPollMillis = millis();
+    if (fastPollsLeft) fastPollsLeft--;
+    pollStove();
   }
 }
