@@ -144,7 +144,7 @@ The folder PCB contains the KiCad 10 project of the Printed Circuit Board of the
 
 Front PCB board:
 
-<img width="2388" height="1665" alt="PCB_Front" src="https://github.com/user-attachments/assets/f6eb6efa-f8fe-48b1-9549-eaa83da76f4e" />
+<img width="2388" height="1665" alt="PCB_Front" src="https://github.com/user-attachments/assets/bb2fe54c-d1e0-400a-82d2-d95d46d6b104" />
 
 Back PCB board:
 
@@ -152,7 +152,8 @@ Back PCB board:
 
 PCB Terminal plug:
 
-<img width="372" height="292" alt="PCB_Terminal" src="https://github.com/user-attachments/assets/97412892-80aa-444d-95c5-fe9f6e5163a5" />
+<img width="965" height="711" alt="PCB_Terminal" src="https://github.com/user-attachments/assets/958f2b04-d8ea-4905-9396-133bf68655a2" />
+
 
 ## Micronova board pinout
 For the details related to the board pinout, refer to the manual. This project allows you to interface the stove with the serial port of the Micronova controller. Ask me in case of any doubts.
