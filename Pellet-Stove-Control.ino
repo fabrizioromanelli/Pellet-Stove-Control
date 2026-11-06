@@ -13,8 +13,14 @@
  * MQTT topics, below the base topic set in the config portal (see README.md):
  *   cmd (subscribed): ON, OFF, P0-P5, F0-F5, Txx, E
  *   state, onoff, ambtemp, tempset, fumetemp, power, fan (retained), connection (not retained)
+ *   status (retained): online / offline (last will), availability of the board
+ *
+ * Home Assistant: MQTT discovery configs are published (retained) below the discovery prefix
+ * at every connection, and again whenever Home Assistant comes back online. The entities they
+ * describe use the topics above, so the topics stay the same for every other integration.
  */
 
+#include <stdarg.h>
 #include <ArduinoOTA.h>
 #include <WiFiManager.h>
 #include <PubSubClient.h>
@@ -25,9 +31,13 @@
 // Settings
 // ---------------------------------------------------------------------------------------------
 
+#define FW_VERSION   "2.0.0"
 #define AP_NAME      "PelletStove-Setup" // Access point of the config portal
 #define CONFIG_FILE  "/mqtt_config.txt"  // MQTT settings on LittleFS, one per line
 #define OTA_PASSWORD "micronova"
+
+#define HA_DEFAULT_PREFIX "homeassistant" // Discovery prefix used when the portal field is empty
+#define HA_DEVICE_NAME    "Pellet Stove"  // Device name in Home Assistant (renamable there)
 
 const unsigned long UPDATE_PERIOD      = 1800000; // 30 min between two polls...
 const unsigned long FAST_UPDATE_PERIOD = 60000;   // ...1 min after a command,
@@ -35,9 +45,10 @@ const uint8_t       FAST_LOOP_CYCLES   = 30;      // for this many polls
 
 const unsigned long PORTAL_TIMEOUT_S = 180; // Restart when the config portal is left idle
 
-// Target temperature range for the Txx command (°C): values outside are clamped
-const uint8_t TEMP_SET_MIN = 10;
-const uint8_t TEMP_SET_MAX = 40;
+// Target temperature range for the Txx command (°C): values outside are clamped. Macros, since
+// they also go in the Home Assistant discovery config. Both must have two digits (Txx).
+#define TEMP_SET_MIN 10
+#define TEMP_SET_MAX 40
 
 #if defined(ESP32)
 // ESP32 DevKit. ENABLE_RX must be output capable: GPIO34-39 are input only.
@@ -93,6 +104,10 @@ const unsigned long READ_GAP_MS      = 100; // After each register read
 #define TOPIC_FUMETEMP   "fumetemp"
 #define TOPIC_POWER      "power"
 #define TOPIC_FAN        "fan"
+#define TOPIC_STATUS     "status"     // "online", or "offline" as last will (both retained)
+
+#define STATUS_ONLINE  "online"
+#define STATUS_OFFLINE "offline"
 
 // Stove states: text published on "state" and the matching "onoff" value (nullptr = none)
 struct StoveState { const char *text; const char *onoff; };
@@ -133,6 +148,16 @@ char mqtt_port[7]    = "1883";
 char mqtt_topic[41]  = ""; // Base topic
 char mqtt_user[65]   = "";
 char mqtt_pass[65]   = "";
+char ha_prefix[33]   = HA_DEFAULT_PREFIX; // Home Assistant discovery prefix, empty = default
+
+// Topics subscribed to, compared in callback()
+char cmdTopic[sizeof(mqtt_topic) + sizeof("/" TOPIC_CMD)];
+// Home Assistant birth/will. Its topic is a setting of its own in Home Assistant: the default
+// one is listened to as well, in case only the discovery prefix was changed.
+#define HA_DEFAULT_STATUS_TOPIC HA_DEFAULT_PREFIX "/status"
+char haStatusTopic[sizeof(ha_prefix) + sizeof("/status")]; // "<prefix>/status"
+
+char deviceId[13] = ""; // MAC address in hex: unique and stable id of this board
 
 SoftwareSerial StoveSerial;
 WiFiClient espClient;
@@ -148,6 +173,7 @@ uint8_t cmdHead = 0, cmdCount = 0;
 unsigned long lastPollMillis = 0;
 uint8_t fastPollsLeft = 0;     // Polls still due at the fast rate
 bool pollPending = false;      // Poll at once (set on every MQTT connection)
+bool discoveryPending = false; // Publish the discovery configs (connection, Home Assistant restart)
 bool shouldSaveConfig = false; // Set whenever the config portal form is submitted
 
 // ---------------------------------------------------------------------------------------------
@@ -273,9 +299,15 @@ void sendQueuedCommands() {
   }
 }
 
-// Handles "<base>/cmd". Invalid commands are ignored.
-void callback(char *, byte *payload, unsigned int length) {
-  if (length == 0) return;
+// Handles "<base>/cmd" (invalid commands are ignored) and the Home Assistant status topic
+void callback(char *topic, byte *payload, unsigned int length) {
+  if (strcmp(topic, haStatusTopic) == 0 || strcmp(topic, HA_DEFAULT_STATUS_TOPIC) == 0) {
+    // Home Assistant (re)started: send the configs again, in case the broker lost them.
+    // Published from loop(): the client buffer still holds this message.
+    if (length == 6 && memcmp(payload, STATUS_ONLINE, 6) == 0) discoveryPending = true;
+    return;
+  }
+  if (strcmp(topic, cmdTopic) != 0 || length == 0) return;
   const uint8_t arg = length > 1 ? payload[1] : 0;
 
   switch (payload[0]) {
@@ -301,10 +333,119 @@ void callback(char *, byte *payload, unsigned int length) {
 }
 
 // ---------------------------------------------------------------------------------------------
+// Home Assistant MQTT discovery
+// ---------------------------------------------------------------------------------------------
+
+#define STR_(x) #x
+#define STR(x)  STR_(x)
+
+// One retained discovery config per entity, on "<prefix>/<component>/pellet_stove_<id>/<object>/config".
+// members holds the entity specific JSON members: "~" is replaced by the base topic, so every
+// entity works on the topics listed at the top. publishDiscovery() adds the common members.
+struct DiscoveryEntity {
+  const char *component, *object, *members;
+  bool stateOptions = false; // Append the STOVE_STATES texts as "options" (enum sensor)
+};
+const DiscoveryEntity DISCOVERY_ENTITIES[] = {
+  // Thermostat card: on/off, target and ambient temperature, fan speed, what the stove is doing
+  {"climate", "thermostat",
+   R"J("name":null,"icon":"mdi:fireplace","modes":["off","heat"],)J"
+   R"J("mode_command_topic":"~/cmd","mode_command_template":"{{ 'ON' if value == 'heat' else 'OFF' }}",)J"
+   R"J("mode_state_topic":"~/onoff","mode_state_template":"{{ 'heat' if value == 'ON' else 'off' }}",)J"
+   R"J("temperature_command_topic":"~/cmd","temperature_command_template":"T{{ value | int }}",)J"
+   R"J("temperature_state_topic":"~/tempset","current_temperature_topic":"~/ambtemp",)J"
+   R"J("min_temp":)J" STR(TEMP_SET_MIN) R"J(,"max_temp":)J" STR(TEMP_SET_MAX)
+   R"J(,"temp_step":1,"precision":0.5,"temperature_unit":"C",)J"
+   R"J("fan_modes":["auto","1","2","3","4","5"],"fan_mode_command_topic":"~/cmd",)J"
+   R"J("fan_mode_command_template":"F{{ 0 if value == 'auto' else value }}",)J"
+   R"J("fan_mode_state_topic":"~/fan","fan_mode_state_template":"{{ 'auto' if value == '0' else value }}",)J"
+   R"J("action_topic":"~/state","action_template":"{{ {'Spenta': 'off', 'Avvio': 'preheating', )J"
+   R"J('Caricamento pellet': 'preheating', 'Accensione': 'preheating', 'Accesa': 'heating'})J"
+   R"J(.get(value, 'idle') }}")J"},
+  // On/off, e.g. for schedulers and automations
+  {"switch", "power",
+   R"J("name":"Power","icon":"mdi:power","state_topic":"~/onoff","command_topic":"~/cmd",)J"
+   R"J("payload_on":"ON","payload_off":"OFF")J"},
+  // Flame power and fan speed: level 0 is automatic
+  {"select", "power_level",
+   R"J("name":"Power level","icon":"mdi:fire","options":["Auto","1","2","3","4","5"],)J"
+   R"J("state_topic":"~/power","value_template":"{{ 'Auto' if value == '0' else value }}",)J"
+   R"J("command_topic":"~/cmd","command_template":"P{{ 0 if value == 'Auto' else value }}")J"},
+  {"select", "fan_speed",
+   R"J("name":"Fan speed","icon":"mdi:fan","options":["Auto","1","2","3","4","5"],)J"
+   R"J("state_topic":"~/fan","value_template":"{{ 'Auto' if value == '0' else value }}",)J"
+   R"J("command_topic":"~/cmd","command_template":"F{{ 0 if value == 'Auto' else value }}")J"},
+  {"sensor", "state",
+   R"J("name":"State","icon":"mdi:fire-alert","state_topic":"~/state","device_class":"enum")J",
+   true},
+  {"sensor", "ambient_temperature",
+   R"J("name":"Ambient temperature","state_topic":"~/ambtemp","device_class":"temperature",)J"
+   R"J("state_class":"measurement","unit_of_measurement":"°C","suggested_display_precision":1)J"},
+  {"sensor", "fumes_temperature",
+   R"J("name":"Fumes temperature","icon":"mdi:thermometer-high","state_topic":"~/fumetemp",)J"
+   R"J("device_class":"temperature","state_class":"measurement","unit_of_measurement":"°C",)J"
+   R"J("suggested_display_precision":0)J"},
+  // Error reset: same frame as OFF
+  {"button", "error_reset",
+   R"J("name":"Error reset","icon":"mdi:restart","command_topic":"~/cmd","payload_press":"E",)J"
+   R"J("entity_category":"config")J"},
+};
+
+// Payloads are streamed to the broker (beginPublish), so they don't need to fit the PubSubClient
+// buffer (256 bytes). The longest one, the thermostat, takes about 1.3 kB.
+char discoveryBuf[1536];
+size_t discoveryLen; // >= sizeof(discoveryBuf) once the payload doesn't fit
+
+// Appends to discoveryBuf, printf style
+void appendDiscovery(const char *format, ...) {
+  if (discoveryLen >= sizeof(discoveryBuf)) return;
+  const size_t room = sizeof(discoveryBuf) - discoveryLen;
+  va_list args;
+  va_start(args, format);
+  const int n = vsnprintf(discoveryBuf + discoveryLen, room, format, args);
+  va_end(args);
+  discoveryLen = (n < 0 || (size_t)n >= room) ? sizeof(discoveryBuf) : discoveryLen + n;
+}
+
+void publishDiscovery() {
+  const char *prefix = ha_prefix[0] ? ha_prefix : HA_DEFAULT_PREFIX;
+  for (const DiscoveryEntity &entity : DISCOVERY_ENTITIES) {
+    discoveryLen = 0;
+    appendDiscovery("{\"~\":\"%s\",\"unique_id\":\"pellet_stove_%s_%s\","
+                    "\"availability_topic\":\"~/" TOPIC_STATUS "\",%s",
+                    mqtt_topic, deviceId, entity.object, entity.members);
+    if (entity.stateOptions) {
+      appendDiscovery(",\"options\":[");
+      for (size_t i = 0; i < sizeof(STOVE_STATES) / sizeof(STOVE_STATES[0]); i++)
+        appendDiscovery("%s\"%s\"", i ? "," : "", STOVE_STATES[i].text);
+      appendDiscovery("]");
+    }
+    appendDiscovery(",\"device\":{\"identifiers\":[\"pellet_stove_%s\"],\"name\":\"" HA_DEVICE_NAME "\","
+                    "\"model\":\"Pellet Stove Control\",\"sw_version\":\"" FW_VERSION "\"},"
+                    "\"origin\":{\"name\":\"Pellet-Stove-Control\",\"sw_version\":\"" FW_VERSION "\","
+                    "\"support_url\":\"https://github.com/fabrizioromanelli/Pellet-Stove-Control\"}}",
+                    deviceId);
+    if (discoveryLen >= sizeof(discoveryBuf)) {
+      Serial.print(F("Discovery config too long, skipped: "));
+      Serial.println(entity.object);
+      continue;
+    }
+
+    char topic[sizeof(ha_prefix) + 80];
+    snprintf(topic, sizeof(topic), "%s/%s/pellet_stove_%s/%s/config",
+             prefix, entity.component, deviceId, entity.object);
+    if (!client.beginPublish(topic, discoveryLen, true)) return; // Connection lost
+    client.write((const uint8_t *)discoveryBuf, discoveryLen);
+    client.endPublish();
+  }
+}
+
+// ---------------------------------------------------------------------------------------------
 // Connectivity
 // ---------------------------------------------------------------------------------------------
 
-// The MQTT settings, in CONFIG_FILE line order
+// The MQTT settings, in CONFIG_FILE line order. New settings go at the end: the files saved by
+// older firmware versions lack their lines, which are then read as empty.
 struct ConfigField { char *value; size_t size; };
 const ConfigField CONFIG_FIELDS[] = {
   {mqtt_server, sizeof(mqtt_server)},
@@ -312,6 +453,7 @@ const ConfigField CONFIG_FIELDS[] = {
   {mqtt_topic,  sizeof(mqtt_topic)},
   {mqtt_user,   sizeof(mqtt_user)},
   {mqtt_pass,   sizeof(mqtt_pass)},
+  {ha_prefix,   sizeof(ha_prefix)},
 };
 const size_t CONFIG_FIELD_COUNT = sizeof(CONFIG_FIELDS) / sizeof(CONFIG_FIELDS[0]);
 
@@ -343,6 +485,8 @@ void setupWifi() {
     {"user",   "MQTT user",       mqtt_user,   sizeof(mqtt_user) - 1},
     {"pass",   "MQTT password (empty = keep the saved one)", "", sizeof(mqtt_pass) - 1,
      "type=\"password\""},
+    {"haprefix", "Home Assistant discovery prefix (empty = " HA_DEFAULT_PREFIX ")",
+     ha_prefix, sizeof(ha_prefix) - 1},
   };
   static_assert(sizeof(fields) / sizeof(fields[0]) == CONFIG_FIELD_COUNT, "one field per setting");
 
@@ -380,13 +524,18 @@ bool reconnect() {
     Serial.print(F("Attempting MQTT connection..."));
     char clientId[15];
     snprintf(clientId, sizeof(clientId), "ESPClient-%X", (unsigned)random(0xffff));
-    // Credentials are sent only when a user is configured
+    // Credentials are sent only when a user is configured. The broker publishes the last will
+    // ("offline" on the status topic) when the board drops off.
     const char *user = mqtt_user[0] ? mqtt_user : nullptr;
-    if (client.connect(clientId, user, user ? mqtt_pass : nullptr)) {
+    char statusTopic[sizeof(mqtt_topic) + sizeof("/" TOPIC_STATUS)];
+    snprintf(statusTopic, sizeof(statusTopic), "%s/" TOPIC_STATUS, mqtt_topic);
+    if (client.connect(clientId, user, user ? mqtt_pass : nullptr,
+                       statusTopic, 0, true, STATUS_OFFLINE)) {
       Serial.println(F("connected"));
-      char topic[sizeof(mqtt_topic) + sizeof("/" TOPIC_CMD)];
-      snprintf(topic, sizeof(topic), "%s/" TOPIC_CMD, mqtt_topic);
-      client.subscribe(topic);
+      client.subscribe(cmdTopic);
+      client.subscribe(haStatusTopic);
+      if (strcmp(haStatusTopic, HA_DEFAULT_STATUS_TOPIC) != 0) client.subscribe(HA_DEFAULT_STATUS_TOPIC);
+      publish(TOPIC_STATUS, STATUS_ONLINE);
       return true;
     }
     Serial.print(F("failed, rc="));
@@ -423,14 +572,30 @@ void setup() {
   ArduinoOTA.setPassword(OTA_PASSWORD);
   ArduinoOTA.begin();
 
+  uint8_t mac[6];
+  WiFi.macAddress(mac);
+  snprintf(deviceId, sizeof(deviceId), "%02x%02x%02x%02x%02x%02x",
+           mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+  snprintf(cmdTopic, sizeof(cmdTopic), "%s/" TOPIC_CMD, mqtt_topic);
+  snprintf(haStatusTopic, sizeof(haStatusTopic), "%s/status",
+           ha_prefix[0] ? ha_prefix : HA_DEFAULT_PREFIX);
+
   client.setServer(mqtt_server, atoi(mqtt_port));
   client.setCallback(callback);
 }
 
 void loop() {
-  if (!client.connected() && reconnect()) pollPending = true; // Refresh every topic
-  client.loop(); // Delivers MQTT commands to callback()
+  if (!client.connected() && reconnect()) {
+    discoveryPending = true; // Refresh the discovery configs...
+    pollPending = true;      // ...and every topic
+  }
+  client.loop(); // Delivers MQTT messages to callback()
   ArduinoOTA.handle();
+
+  if (discoveryPending && client.connected()) {
+    discoveryPending = false;
+    publishDiscovery();
+  }
 
   sendQueuedCommands();
 
