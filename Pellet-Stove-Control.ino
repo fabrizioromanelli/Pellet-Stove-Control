@@ -503,7 +503,12 @@ void setupWifi() {
   };
   static_assert(sizeof(fields) / sizeof(fields[0]) == CONFIG_FIELD_COUNT, "one field per setting");
 
+  // Firmware version: in the title of the portal pages and above the settings form
+  WiFiManagerParameter versionInfo("<p>Pellet Stove Control, firmware v" FW_VERSION "</p>");
+
   WiFiManager wm; // Only needed here: released on return
+  wm.setTitle(F("Pellet Stove Control v" FW_VERSION));
+  wm.addParameter(&versionInfo); // Display only: no id, so nothing is read back from it
   for (WiFiManagerParameter &field : fields) wm.addParameter(&field);
   wm.setSaveParamsCallback([] { shouldSaveConfig = true; }); // On every form submit
   wm.setConnectTimeout(30);
@@ -564,6 +569,7 @@ void setup() {
   pinMode(ENABLE_RX, OUTPUT);
   digitalWrite(ENABLE_RX, HIGH); // Receiver disabled until a reply is expected
   Serial.begin(115200);
+  Serial.println(F("\nPellet Stove Control v" FW_VERSION));
   // RX only collects the 2-byte replies, so a small buffer is plenty
   StoveSerial.begin(1200, SWSERIAL_8N2, RX_PIN, TX_PIN, false, 64);
 

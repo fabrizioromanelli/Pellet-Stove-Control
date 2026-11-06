@@ -169,7 +169,7 @@ Requirements (Arduino IDE or `arduino-cli`):
 Then:
 - Build the sketch (no editing required) and upload it on the board
 - On first boot (or whenever the saved WiFi network can't be reached, or the MQTT server/base topic are not set), connect to the `PelletStove-Setup` WiFi network from your phone/PC (192.168.4.1)
-- The browser should redirect to the configuration page where you can set up your WiFi credentials, together with the following MQTT parameters:
+- The browser should redirect to the configuration page, whose title and settings form show the firmware version of the board (it is also printed on the serial port at boot, 115200 baud). There you can set up your WiFi credentials, together with the following MQTT parameters:
   - **MQTT server**, the IP or hostname of your MQTT broker (up to 40 characters)
   - **MQTT port**, usually `1883`
   - **MQTT base topic**, the name of the topic you choose to publish on (required, up to 40 characters, without a trailing `/`), see [MQTT topics](#mqtt-topics)
