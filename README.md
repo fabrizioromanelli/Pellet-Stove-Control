@@ -169,12 +169,13 @@ Requirements (Arduino IDE or `arduino-cli`):
 Then:
 - Build the sketch (no editing required) and upload it on the board
 - On first boot (or whenever the saved WiFi network can't be reached, or the MQTT server/base topic are not set), connect to the `PelletStove-Setup` WiFi network from your phone/PC (192.168.4.1)
-- The browser should redirect to the configuration page where you can set up your WiFi credentials, together with the following MQTT parameters:
+- The browser should redirect to the configuration page, whose title and settings form show the firmware version of the board (it is also printed on the serial port at boot, 115200 baud). There you can set up your WiFi credentials, together with the following MQTT parameters:
   - **MQTT server**, the IP or hostname of your MQTT broker (up to 40 characters)
   - **MQTT port**, usually `1883`
   - **MQTT base topic**, the name of the topic you choose to publish on (required, up to 40 characters, without a trailing `/`), see [MQTT topics](#mqtt-topics)
   - **MQTT user**, if any (up to 64 characters; leave it empty to connect without credentials)
   - **MQTT password**, if any (up to 64 characters). The saved password is never shown: leave the field empty to keep it
+  - **Home Assistant discovery prefix**, leave it empty to use the default `homeassistant` (up to 32 characters), see [Home Assistant](#home-assistant)
 - Once submitted, the board connects to your WiFi/MQTT broker. The MQTT settings are stored as plain text on the board's flash (LittleFS, `/mqtt_config.txt`), the WiFi credentials by the ESP itself, so they are restored automatically on every subsequent reboot. The MQTT settings are saved at every submit of the form; leading and trailing spaces are removed from all the fields
 - If the portal is left unused for 3 minutes, the board restarts and tries the saved WiFi network again: after a power cut, it reconnects by itself as soon as your router is back
 - To change the settings later on, erase the saved WiFi credentials so that the `PelletStove-Setup` portal comes up again, pre-filled with the previously saved values: e.g. upload the sketch via USB with *Tools > Erase Flash > Sketch + WiFi Settings* (ESP8266). *All Flash Contents* erases the saved MQTT settings too
@@ -209,6 +210,7 @@ All the topics are below the **MQTT base topic** set in the portal, e.g. with th
 |`<base>/power`|from the stove|yes|flame power level, `0` to `5`|
 |`<base>/fan`|from the stove|yes|fan speed level, `0` to `5` (`0` = automatic)|
 |`<base>/connection`|from the board|no|`Connected`, after every reading of the stove|
+|`<base>/status`|from the board|yes|`online` when the board connects to the broker, `offline` (last will, published by the broker) when it drops off|
 
 The board reads the stove every 30 minutes, right after every (re)connection to the MQTT broker, and every minute for the next 30 readings after any command, so that its effects show up quickly. Each reading takes about 2 seconds.
 `onoff` is published after every reading (when the stove state implies it, see below) and right after an `ON`, `OFF` or `E` command is sent.
@@ -259,7 +261,121 @@ The serial line runs at 1200 baud, 8 data bits, no parity, 2 stop bits:
 Replies whose checksum doesn't match the requested register are discarded. Registers, command frames and stove states are detailed in [docs/micronova_stove_commands_mapping.xlsx](docs/micronova_stove_commands_mapping.xlsx).
 
 ## Home Assistant
-The firmware does not use the MQTT discovery: the Home Assistant entities have to be configured on the topics above. For Home Assistant support, please contact me.
-An example of how the HA integration would look like in the Home Assistant Dashboard follows:
+The firmware supports the Home Assistant [MQTT discovery](https://www.home-assistant.io/integrations/mqtt/#mqtt-discovery): once the [MQTT integration](https://www.home-assistant.io/integrations/mqtt/) is set up on the same broker, the stove shows up by itself as a **Pellet Stove** device (*Settings > Devices & services > MQTT*). No YAML, helper or automation is needed.
+
+At every connection to the broker the board publishes, as retained messages, one discovery config per entity on `<prefix>/<component>/pellet_stove_<MAC>/<entity>/config` (`<prefix>` is the discovery prefix set in the portal, `homeassistant` by default). It publishes them again whenever Home Assistant restarts, i.e. when `online` arrives on its birth message topic: the board listens on both `homeassistant/status` (the Home Assistant default) and `<prefix>/status`. If you change the discovery prefix, set the same one in the Home Assistant MQTT options (*Settings > Devices & services > MQTT > Configure*), otherwise the stove is not discovered. The entities work on the [MQTT topics](#mqtt-topics) above, which do not change: other integrations (openHAB, Node-RED, ...) keep working as before and can simply ignore the discovery messages.
+
+|Entity|Type|Topics|Notes|
+|---|---|---|---|
+|Pellet Stove|`climate`|`onoff`, `tempset`, `ambtemp`, `fan`, `state`, `cmd`|thermostat card: on/off (`heat`/`off`), target temperature (10-40 °C), ambient temperature, fan speed (`auto`, `1`-`5`), current action (preheating, heating, idle, off)|
+|Target temperature|`number`|`tempset`, `cmd`|10-40 °C, the same setting as the thermostat, for entities cards and automations|
+|Power|`switch`|`onoff`, `cmd`|switches the stove on and off, e.g. from a scheduler|
+|Power level|`select`|`power`, `cmd`|`Auto`, `1`-`5` (`Auto` = `P0`)|
+|Fan speed|`select`|`fan`, `cmd`|`Auto`, `1`-`5` (`Auto` = `F0`)|
+|State|`sensor` (enum)|`state`|see [Stove states](#stove-states)|
+|Ambient temperature|`sensor`|`ambtemp`|°C|
+|Fumes temperature|`sensor`|`fumetemp`|°C|
+|Error reset|`button`|`cmd`|sends `E`|
+|Connection|`binary_sensor`|`status`|connected / disconnected board (diagnostic)|
+
+All the entities but Connection become *unavailable* when the board is not connected to the broker (`<base>/status`). The device is identified by the MAC address of the board, so the entities keep their ids across reboots and changes of the base topic; names and entity ids can be changed in Home Assistant as usual.
+
+Keep in mind that the target temperature, the power level and the fan speed are saved on the stove EEPROM (see [above](#command-currently-supported-by-the-pellet-stove-control)): every change from Home Assistant is an EEPROM write, so avoid automations that change them often.
+
+### Upgrading from a manual configuration
+If you configured the stove by hand (MQTT sensors in `configuration.yaml`, `input_boolean`/`input_number` helpers and the automations that kept them in sync with the topics), remove that configuration after upgrading the firmware, otherwise you get two sets of entities for the same stove. Then update the dashboards and automations to use the new entities.
+
+### Removing the device
+The discovery configs are retained by the broker, and the board publishes them again at every connection. To remove the stove from Home Assistant for good, unplug the board (or flash another firmware) and then delete the device from its page in Home Assistant, which also clears the retained configs on the broker.
+
+### Example: automatic error reset
+Automations are no longer needed to drive the stove, but they can still add behaviours. For instance, this one resets the stove and switches it on again 5 minutes after an ignition failure or a missing pellet error, at most twice in a row (it needs a `counter` helper, `counter.stove_reset_counter`, which is reset as soon as the stove is running again). Replace the entity ids with yours:
+
+```yaml
+triggers:
+  - trigger: state
+    entity_id: sensor.pellet_stove_state
+    to:
+      - Pellet mancante
+      - Mancata accensione
+    for:
+      minutes: 5
+conditions:
+  - condition: numeric_state
+    entity_id: counter.stove_reset_counter
+    below: 2
+actions:
+  - action: button.press
+    target:
+      entity_id: button.pellet_stove_error_reset
+  - delay:
+      seconds: 5
+  - action: switch.turn_on
+    target:
+      entity_id: switch.pellet_stove_power
+  - action: counter.increment
+    target:
+      entity_id: counter.stove_reset_counter
+mode: single
+alias: Stove automatic error reset
+description: Stove automatic error reset
+
+triggers:
+  - trigger: state
+    entity_id: sensor.pellet_stove_state
+    to: Accesa
+actions:
+  - action: counter.reset
+    target:
+      entity_id: counter.stove_reset_counter
+mode: single
+alias: Stove reset counter
+description: Stove reset counter
+```
+
+### Example: dashboard card
+The discovered entities can be grouped in a Lovelace card for the stove, e.g. with this `entities` card (*Edit dashboard > Add card > Manual*):
+
+```yaml
+color: state
+type: entities
+entities:
+  - entity: number.pellet_stove_target_temperature
+    name: Temperatura
+  - entity: select.pellet_stove_power_level
+    name: Potenza
+  - entity: select.pellet_stove_fan_speed
+    name: Velocità Ventola
+  - type: button
+    name: Reset errori
+    action_name: Reset
+    icon: mdi:restore
+    tap_action:
+      action: perform-action
+      perform_action: button.press
+      target:
+        entity_id: button.pellet_stove_error_reset
+  - type: section
+  - entity: binary_sensor.pellet_stove_connection
+    name: Connessione
+  - entity: sensor.pellet_stove_state
+    name: Stato
+show_header_toggle: false
+header:
+  type: picture
+  image: /local/stove.jpg
+  tap_action:
+    action: none
+  hold_action:
+    action: none
+visibility:
+  - condition: state
+    entity: binary_sensor.pellet_stove_connection
+    state: "on"
+```
+
+The header picture is served from `/local/`, i.e. it must be copied to the `www` folder of the Home Assistant configuration (`config/www/stove.jpg`): use any picture of your stove, or remove the `header` block. The `visibility` condition shows the card only while the board is connected to the broker. Replace the entity ids with yours, and the names with the ones you prefer.
+
+An example of how the stove looks like in the Home Assistant Dashboard follows:
 
 <img width="507" height="694" alt="stove_ui_english" src="https://github.com/user-attachments/assets/de362841-d9f4-4ab8-b2a0-c1b178b3bd08" />
