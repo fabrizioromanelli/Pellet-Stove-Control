@@ -292,44 +292,89 @@ The discovery configs are retained by the broker, and the board publishes them a
 Automations are no longer needed to drive the stove, but they can still add behaviours. For instance, this one resets the stove and switches it on again 5 minutes after an ignition failure or a missing pellet error, at most twice in a row (it needs a `counter` helper, `counter.stove_reset_counter`, which is reset as soon as the stove is running again). Replace the entity ids with yours:
 
 ```yaml
-- alias: Stove automatic error reset
-  triggers:
-    - trigger: state
-      entity_id: sensor.pellet_stove_state
-      to:
-        - Pellet mancante
-        - Mancata accensione
-      for:
-        minutes: 5
-  conditions:
-    - condition: numeric_state
+triggers:
+  - trigger: state
+    entity_id: sensor.pellet_stove_state
+    to:
+      - Pellet mancante
+      - Mancata accensione
+    for:
+      minutes: 5
+conditions:
+  - condition: numeric_state
+    entity_id: counter.stove_reset_counter
+    below: 2
+actions:
+  - action: button.press
+    target:
+      entity_id: button.pellet_stove_error_reset
+  - delay:
+      seconds: 5
+  - action: switch.turn_on
+    target:
+      entity_id: switch.pellet_stove_power
+  - action: counter.increment
+    target:
       entity_id: counter.stove_reset_counter
-      below: 2
-  actions:
-    - action: button.press
+mode: single
+alias: Stove automatic error reset
+description: Stove automatic error reset
+
+triggers:
+  - trigger: state
+    entity_id: sensor.pellet_stove_state
+    to: Accesa
+actions:
+  - action: counter.reset
+    target:
+      entity_id: counter.stove_reset_counter
+mode: single
+alias: Stove reset counter
+description: Stove reset counter
+```
+
+### Example: dashboard card
+The discovered entities can be grouped in a Lovelace card for the stove, e.g. with this `entities` card (*Edit dashboard > Add card > Manual*):
+
+```yaml
+color: state
+type: entities
+entities:
+  - entity: number.pellet_stove_target_temperature
+    name: Temperatura
+  - entity: select.pellet_stove_power_level
+    name: Potenza
+  - entity: select.pellet_stove_fan_speed
+    name: Velocità Ventola
+  - type: button
+    name: Reset errori
+    action_name: Reset
+    icon: mdi:restore
+    tap_action:
+      action: perform-action
+      perform_action: button.press
       target:
         entity_id: button.pellet_stove_error_reset
-    - delay:
-        seconds: 5
-    - action: switch.turn_on
-      target:
-        entity_id: switch.pellet_stove_power
-    - action: counter.increment
-      target:
-        entity_id: counter.stove_reset_counter
-  mode: single
-
-- alias: Stove reset counter
-  triggers:
-    - trigger: state
-      entity_id: sensor.pellet_stove_state
-      to: Accesa
-  actions:
-    - action: counter.reset
-      target:
-        entity_id: counter.stove_reset_counter
-  mode: single
+  - type: section
+  - entity: binary_sensor.pellet_stove_connection
+    name: Connessione
+  - entity: sensor.pellet_stove_state
+    name: Stato
+show_header_toggle: false
+header:
+  type: picture
+  image: /local/stove.jpg
+  tap_action:
+    action: none
+  hold_action:
+    action: none
+visibility:
+  - condition: state
+    entity: binary_sensor.pellet_stove_connection
+    state: "on"
 ```
+
+The header picture is served from `/local/`, i.e. it must be copied to the `www` folder of the Home Assistant configuration (`config/www/stove.jpg`): use any picture of your stove, or remove the `header` block. The `visibility` condition shows the card only while the board is connected to the broker. Replace the entity ids with yours, and the names with the ones you prefer.
 
 An example of how the stove looks like in the Home Assistant Dashboard follows:
 

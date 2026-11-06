@@ -31,7 +31,7 @@
 // Settings
 // ---------------------------------------------------------------------------------------------
 
-#define FW_VERSION   "2.1.0"
+#define FW_VERSION   "4.2.0"
 #define AP_NAME      "PelletStove-Setup" // Access point of the config portal
 #define CONFIG_FILE  "/mqtt_config.txt"  // MQTT settings on LittleFS, one per line
 #define OTA_PASSWORD "micronova"
