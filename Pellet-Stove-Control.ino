@@ -31,7 +31,7 @@
 // Settings
 // ---------------------------------------------------------------------------------------------
 
-#define FW_VERSION   "2.0.0"
+#define FW_VERSION   "2.1.0"
 #define AP_NAME      "PelletStove-Setup" // Access point of the config portal
 #define CONFIG_FILE  "/mqtt_config.txt"  // MQTT settings on LittleFS, one per line
 #define OTA_PASSWORD "micronova"
@@ -344,7 +344,8 @@ void callback(char *topic, byte *payload, unsigned int length) {
 // entity works on the topics listed at the top. publishDiscovery() adds the common members.
 struct DiscoveryEntity {
   const char *component, *object, *members;
-  bool stateOptions = false; // Append the STOVE_STATES texts as "options" (enum sensor)
+  bool stateOptions = false;    // Append the STOVE_STATES texts as "options" (enum sensor)
+  bool alwaysAvailable = false; // No availability topic: the entity also works while offline
 };
 const DiscoveryEntity DISCOVERY_ENTITIES[] = {
   // Thermostat card: on/off, target and ambient temperature, fan speed, what the stove is doing
@@ -362,6 +363,12 @@ const DiscoveryEntity DISCOVERY_ENTITIES[] = {
    R"J("action_topic":"~/state","action_template":"{{ {'Spenta': 'off', 'Avvio': 'preheating', )J"
    R"J('Caricamento pellet': 'preheating', 'Accensione': 'preheating', 'Accesa': 'heating'})J"
    R"J(.get(value, 'idle') }}")J"},
+  // Target temperature on its own, e.g. for entities cards and automations
+  {"number", "target_temperature",
+   R"J("name":"Target temperature","icon":"mdi:thermometer","device_class":"temperature",)J"
+   R"J("unit_of_measurement":"°C","min":)J" STR(TEMP_SET_MIN) R"J(,"max":)J" STR(TEMP_SET_MAX)
+   R"J(,"step":1,"state_topic":"~/tempset","command_topic":"~/cmd",)J"
+   R"J("command_template":"T{{ value | int }}")J"},
   // On/off, e.g. for schedulers and automations
   {"switch", "power",
    R"J("name":"Power","icon":"mdi:power","state_topic":"~/onoff","command_topic":"~/cmd",)J"
@@ -389,6 +396,11 @@ const DiscoveryEntity DISCOVERY_ENTITIES[] = {
   {"button", "error_reset",
    R"J("name":"Error reset","icon":"mdi:restart","command_topic":"~/cmd","payload_press":"E",)J"
    R"J("entity_category":"config")J"},
+  // Board connected to the broker or not: the status topic itself, so never unavailable
+  {"binary_sensor", "connection",
+   R"J("name":"Connection","device_class":"connectivity","entity_category":"diagnostic",)J"
+   R"J("state_topic":"~/status","payload_on":"online","payload_off":"offline")J",
+   false, true},
 };
 
 // Payloads are streamed to the broker (beginPublish), so they don't need to fit the PubSubClient
@@ -411,9 +423,10 @@ void publishDiscovery() {
   const char *prefix = ha_prefix[0] ? ha_prefix : HA_DEFAULT_PREFIX;
   for (const DiscoveryEntity &entity : DISCOVERY_ENTITIES) {
     discoveryLen = 0;
-    appendDiscovery("{\"~\":\"%s\",\"unique_id\":\"pellet_stove_%s_%s\","
-                    "\"availability_topic\":\"~/" TOPIC_STATUS "\",%s",
-                    mqtt_topic, deviceId, entity.object, entity.members);
+    appendDiscovery("{\"~\":\"%s\",\"unique_id\":\"pellet_stove_%s_%s\",%s%s",
+                    mqtt_topic, deviceId, entity.object,
+                    entity.alwaysAvailable ? "" : "\"availability_topic\":\"~/" TOPIC_STATUS "\",",
+                    entity.members);
     if (entity.stateOptions) {
       appendDiscovery(",\"options\":[");
       for (size_t i = 0; i < sizeof(STOVE_STATES) / sizeof(STOVE_STATES[0]); i++)

@@ -268,6 +268,7 @@ At every connection to the broker the board publishes, as retained messages, one
 |Entity|Type|Topics|Notes|
 |---|---|---|---|
 |Pellet Stove|`climate`|`onoff`, `tempset`, `ambtemp`, `fan`, `state`, `cmd`|thermostat card: on/off (`heat`/`off`), target temperature (10-40 °C), ambient temperature, fan speed (`auto`, `1`-`5`), current action (preheating, heating, idle, off)|
+|Target temperature|`number`|`tempset`, `cmd`|10-40 °C, the same setting as the thermostat, for entities cards and automations|
 |Power|`switch`|`onoff`, `cmd`|switches the stove on and off, e.g. from a scheduler|
 |Power level|`select`|`power`, `cmd`|`Auto`, `1`-`5` (`Auto` = `P0`)|
 |Fan speed|`select`|`fan`, `cmd`|`Auto`, `1`-`5` (`Auto` = `F0`)|
@@ -275,8 +276,9 @@ At every connection to the broker the board publishes, as retained messages, one
 |Ambient temperature|`sensor`|`ambtemp`|°C|
 |Fumes temperature|`sensor`|`fumetemp`|°C|
 |Error reset|`button`|`cmd`|sends `E`|
+|Connection|`binary_sensor`|`status`|connected / disconnected board (diagnostic)|
 
-All the entities become *unavailable* when the board is not connected to the broker (`<base>/status`). The device is identified by the MAC address of the board, so the entities keep their ids across reboots and changes of the base topic; names and entity ids can be changed in Home Assistant as usual.
+All the entities but Connection become *unavailable* when the board is not connected to the broker (`<base>/status`). The device is identified by the MAC address of the board, so the entities keep their ids across reboots and changes of the base topic; names and entity ids can be changed in Home Assistant as usual.
 
 Keep in mind that the target temperature, the power level and the fan speed are saved on the stove EEPROM (see [above](#command-currently-supported-by-the-pellet-stove-control)): every change from Home Assistant is an EEPROM write, so avoid automations that change them often.
 
