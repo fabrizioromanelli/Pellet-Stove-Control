@@ -154,11 +154,22 @@ PCB Terminal plug:
 
 <img width="965" height="711" alt="PCB_Terminal" src="https://github.com/user-attachments/assets/958f2b04-d8ea-4905-9396-133bf68655a2" />
 
-A fast and reliable PCB prototype factory is PCBWay. You can print your own PCB projects here:
+## PCBWay sponsorship
+
+PCBWay is sponsoring this project by supporting the manufacturing of the Pellet Stove Control interface boards. I would like to thank them for helping make the hardware side of this open-source project possible.
+
+The boards I received have a clean, professional finish and very good overall manufacturing quality. The ordering process was straightforward, and PCBWay's communication and support were helpful throughout. Overall, my experience with PCBWay has been very positive, and I am happy with the quality of the boards and the service provided.
+
+If you are working on your own electronics project, you can find out more about PCBWay's PCB manufacturing service here:
 
 <a href="https://www.pcbway.com/" target="_blank">
   <img src="https://cdn.xingosoftware.com/elektor/images/fetch/dpr_1,w_400,h_300,c_fit/https%3A%2F%2Fwww.elektormagazine.com%2Fassets%2Fupload%2Fimages%2F42%2F20200414102935_PCBWay-logo-400x300.jpg" alt="PCBWay" width="200">
 </a>
+
+Here follows a brand new layout of the PCBs with a cool white finish.
+
+<img width="1280" height="692" alt="PCBWay-manufactured Pellet Stove Control boards" src="https://github.com/user-attachments/assets/7f136b01-cd71-43b6-a0da-3379bee5ba44" />
+
 
 ## Micronova board pinout
 For the details related to the board pinout, refer to the manual. This project allows you to interface the stove with the serial port of the Micronova controller. Ask me in case of any doubts.
