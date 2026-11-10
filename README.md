@@ -144,11 +144,11 @@ The folder PCB contains the KiCad 10 project of the Printed Circuit Board of the
 
 Front PCB board:
 
-<img width="2388" height="1665" alt="PCB_Front" src="https://github.com/user-attachments/assets/bb2fe54c-d1e0-400a-82d2-d95d46d6b104" />
+<img width="1281" height="1652" alt="PCB Front" src="https://github.com/user-attachments/assets/9ce362d4-5c68-4b68-a911-260a1671d3b2" />
 
 Back PCB board:
 
-<img width="2388" height="1665" alt="PCB_Back" src="https://github.com/user-attachments/assets/4567a263-318d-4a51-a17c-b71abf29fffc" />
+<img width="1271" height="1649" alt="PCB Back" src="https://github.com/user-attachments/assets/08ba1ddb-baf5-43d2-a34b-3aa136e15937" />
 
 PCB Terminal plug:
 
