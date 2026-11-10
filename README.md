@@ -154,6 +154,11 @@ PCB Terminal plug:
 
 <img width="965" height="711" alt="PCB_Terminal" src="https://github.com/user-attachments/assets/958f2b04-d8ea-4905-9396-133bf68655a2" />
 
+A fast and reliable PCB prototype factory is PCBWay. You can print your own PCB projects here:
+
+<a href="https://www.pcbway.com/" target="_blank">
+  <img src="https://cdn.xingosoftware.com/elektor/images/fetch/dpr_1,w_400,h_300,c_fit/https%3A%2F%2Fwww.elektormagazine.com%2Fassets%2Fupload%2Fimages%2F42%2F20200414102935_PCBWay-logo-400x300.jpg" alt="PCBWay" width="200">
+</a>
 
 ## Micronova board pinout
 For the details related to the board pinout, refer to the manual. This project allows you to interface the stove with the serial port of the Micronova controller. Ask me in case of any doubts.
